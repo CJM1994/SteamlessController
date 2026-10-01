@@ -53,6 +53,16 @@ struct ControllerManager::Slot {
                                            SteamController::AccessClaim::Failed;
     int                                lastBatteryPercent = -1;  // -1 = never reported
 
+    // Steam + Y powers the controller off, as it does under Steam. Set once the
+    // firmware has accepted the command, so the silence and the disconnect that
+    // follow are read as what the user asked for rather than as a fault. Atomic
+    // because the read thread sets it and the device sync reads it.
+    std::atomic<bool>                  powerOffRequested{false};
+    // Read thread only. When the command went out, and whether the chord was
+    // already down last frame — it fires on the press, not on every frame held.
+    std::chrono::steady_clock::time_point powerOffAt{};
+    bool                               powerChordDown = false;
+
     // When this slot was last found silent. Probing for a state report costs
     // the full timeout on an empty puck slot, and the acquire path retries in
     // a rapid burst — without this, three empty slots would block the UI
@@ -953,7 +963,8 @@ void ControllerManager::SyncDevices() {
             // Alert only when the controller was in active use; deliberate
             // unplugs while idle (and our own device cycles, which release
             // slots before cycling) stay quiet.
-            if ((*it)->gameModeActive && m_alertFn) {
+            // Nor when the user switched it off with Steam + Y.
+            if ((*it)->gameModeActive && m_alertFn && !(*it)->powerOffRequested.load()) {
                 if ((*it)->transport == SteamController::Transport::Bluetooth)
                     m_alertFn(L"Controller disconnected",
                               L"The Bluetooth connection dropped — the controller "
@@ -1252,7 +1263,8 @@ void ControllerManager::ReadLoop(Slot* slot) {
                 stalled = true;
                 EventLog::Write("STALL: no reports for 4s (lastBattery=%d%%) %ls",
                                 slot->lastBatteryPercent, slot->path.c_str());
-                if (m_alertFn) {
+                // Silence after Steam + Y is the controller doing as it was told.
+                if (m_alertFn && !slot->powerOffRequested.load()) {
                     wchar_t text[256];
                     if (slot->lastBatteryPercent >= 0)
                         swprintf_s(text,
@@ -1311,6 +1323,54 @@ void ControllerManager::ReadLoop(Slot* slot) {
                 EventLog::Write("REPORT: %zu bytes is under the 30 the trackpad "
                                 "mouse requires — trackpad movement is being "
                                 "dropped before it reaches SendInput", n);
+        }
+
+        // Steam + Y powers the controller off, the same chord Steam reserves
+        // for it. Handled before anything else sees the frame so the game never
+        // gets the Guide press or the Y: the virtual pad is released and the
+        // frame dropped. Fires on the press of the chord, in either order, and
+        // not on a cable — the pad is powered by it and would only ignore the
+        // command, after we had frozen input for nothing.
+        {
+            const bool chord = n > 4
+                && (buf[4] & SteamController::BTN_STEAM) != 0
+                && (buf[2] & SteamController::BTN_Y) != 0
+                && slot->transport != SteamController::Transport::Wired;
+            const bool pressed = chord && !slot->powerChordDown;
+            slot->powerChordDown = chord;
+
+            if (pressed && !slot->powerOffRequested.load()) {
+                if (slot->sc->PowerOff()) {
+                    EventLog::Write("POWEROFF: Steam+Y, command sent (transport=%s) %ls",
+                                    SteamController::TransportName(slot->transport),
+                                    slot->path.c_str());
+                    slot->powerOffAt = std::chrono::steady_clock::now();
+                    slot->powerOffRequested = true;
+                    ReleaseHeldPaddleInputs(*slot);
+                    if (slot->vc) {
+                        uint8_t idle[64] = {};
+                        idle[0] = buf[0];
+                        slot->vc->Update(idle, n, m_profile, PadDigital{});
+                    }
+                } else {
+                    EventLog::Write("POWEROFF: Steam+Y, command write failed %ls",
+                                    slot->path.c_str());
+                }
+            }
+
+            if (slot->powerOffRequested.load()) {
+                // The pad has a moment to go quiet. One still reporting after
+                // that ignored the command, or woke straight back up, so hand
+                // it back to the game.
+                static constexpr auto kPowerOffGrace = std::chrono::seconds(3);
+                if (std::chrono::steady_clock::now() - slot->powerOffAt < kPowerOffGrace) {
+                    hasPrev = false;
+                    continue;
+                }
+                slot->powerOffRequested = false;
+                EventLog::Write("POWEROFF: still reporting after %lld s, resuming input",
+                                static_cast<long long>(kPowerOffGrace.count()));
+            }
         }
 
         // Whether each pad is pressed has to be settled before the pads are
