@@ -2227,7 +2227,11 @@ void RemapWindow::Open(HINSTANCE hInst, ControllerManager* mgr,
     // lives for the process, like the class it belongs to.
     wc.hbrBackground = CreateSolidBrush(RGB(0x15, 0x20, 0x2c));
     wc.lpszClassName = CLASS_NAME;
-    wc.style         = CS_DROPSHADOW;
+    // No CS_DROPSHADOW: WS_THICKFRAME already gets the DWM shadow, and the
+    // legacy one stacks a second, hard-edged shadow on top. It is sized to the
+    // whole window rect, invisible resize frame included, and offset right and
+    // down — so it sat a few pixels clear of the drawn window as a glassy band
+    // on the right and bottom edges only.
     RegisterClassExW(&wc); // OK if already registered
 
     // --- Create the popup window on the monitor the user is working on ---
