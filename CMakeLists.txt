@@ -173,6 +173,17 @@ if (MSVC)
     set_target_properties(TriggerProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
 endif()
 
+# PowerOffProbe — tries the firmware "turn off controller" command candidates and
+# watches whether the pad goes quiet, so Steam + Y can power it down (issue #106).
+add_executable(PowerOffProbe
+    src/probe/PowerOffProbe.cpp
+)
+target_link_libraries(PowerOffProbe PRIVATE SteamController)
+if (MSVC)
+    target_compile_options(PowerOffProbe PRIVATE /W4 /WX /utf-8)
+    set_target_properties(PowerOffProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
+endif()
+
 # HapticTester — local-only interactive haptic tuning tool (source is gitignored)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/probe/HapticTester.cpp")
     add_executable(HapticTester src/probe/HapticTester.cpp)

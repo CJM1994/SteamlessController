@@ -269,6 +269,18 @@ bool SteamController::SendKeepalive() {
     return m_device.SendFeatureReport(buf, sizeof(buf));
 }
 
+bool SteamController::PowerOff() {
+    // Rumble first: a motor left running when the pad drops off the link would
+    // be latched on until it wakes again.
+    SetRumble(0, 0);
+
+    static constexpr uint8_t kOff[] = { 'o', 'f', 'f', '!' };
+    uint8_t buf[64];
+    BuildCmd(buf, CMD_TURN_OFF_CONTROLLER, kOff, sizeof(kOff));
+    std::lock_guard<std::mutex> lock(m_writeMutex);
+    return m_device.SendFeatureReport(buf, sizeof(buf));
+}
+
 void SteamController::EmergencyLizardRestore() noexcept {
     if (!m_device.IsOpen()) return;
     uint8_t buf[64];

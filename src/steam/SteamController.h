@@ -60,6 +60,7 @@ public:
     static constexpr uint8_t CMD_SET_SETTINGS           = 0x87;
     static constexpr uint8_t CMD_GET_SETTINGS           = 0x89;
     static constexpr uint8_t CMD_LOAD_DEFAULT_SETTINGS  = 0x8E;  // ← restore settings for lizard on
+    static constexpr uint8_t CMD_TURN_OFF_CONTROLLER    = 0x9F;  // payload "off!" — powers the pad down
 
     // Triton output report IDs.
     static constexpr uint8_t OUT_HAPTIC_RUMBLE   = 0x80;  // continuous two-channel haptic
@@ -211,6 +212,13 @@ public:
     // click haptics — after a period without host feature reports. Call this
     // every couple of seconds while game mode is active, like hid-steam does.
     bool SendKeepalive();
+
+    // Ask the firmware to power the controller off — what Steam does for
+    // Steam + Y. Confirmed on a puck slot with payload "off!" (also accepted
+    // with no payload or a bare "off"). Only means anything on a wireless
+    // link: a pad on a USB cable is powered by the cable and stays on. Returns
+    // whether the write was accepted; the pad going quiet is the real answer.
+    bool PowerOff();
 
     // Crash-context lizard restore: sends the default-mappings and
     // default-settings feature reports WITHOUT taking locks or joining
