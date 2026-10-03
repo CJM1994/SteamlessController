@@ -1,4 +1,5 @@
 #include "VirtualController.h"
+#include "StickConfig.h"
 #include "ViGEmBusInfo.h"
 #include "steam/SteamController.h"
 #include <ViGEm/Client.h>
@@ -60,6 +61,15 @@ static void ApplyBackActionX360(const BackButtonBinding& binding, XUSB_REPORT& r
 // Report translation — STATE → XUSB_REPORT
 // ---------------------------------------------------------------------------
 
+// One stick's X and Y from the state report, through the deadzone. Both
+// platforms read their sticks here, so they cannot disagree about what rest is.
+static StickPos ReadStick(const uint8_t* xy) {
+    int16_t x, y;
+    memcpy(&x, xy,     2);
+    memcpy(&y, xy + 2, 2);
+    return ApplyStickDeadzone(x, y);
+}
+
 static XUSB_REPORT TranslateX360(const uint8_t* buf, size_t n) {
     XUSB_REPORT r{};
     if (n < 18) return r;
@@ -95,10 +105,12 @@ static XUSB_REPORT TranslateX360(const uint8_t* buf, size_t n) {
     r.bLeftTrigger  = static_cast<uint8_t>(std::clamp<int>(ltRaw >> 7, 0, 255));
     r.bRightTrigger = static_cast<uint8_t>(std::clamp<int>(rtRaw >> 7, 0, 255));
 
-    memcpy(&r.sThumbLX, buf + 10, 2);
-    memcpy(&r.sThumbLY, buf + 12, 2);
-    memcpy(&r.sThumbRX, buf + 14, 2);
-    memcpy(&r.sThumbRY, buf + 16, 2);
+    const StickPos ls = ReadStick(buf + 10);
+    const StickPos rs = ReadStick(buf + 14);
+    r.sThumbLX = ls.x;
+    r.sThumbLY = ls.y;
+    r.sThumbRX = rs.x;
+    r.sThumbRY = rs.y;
 
     return r;
 }
@@ -371,15 +383,15 @@ void VirtualController::Update(const uint8_t* buf, size_t n,
             if (r.bTriggerL > 0) r.wButtons |= DS4_BUTTON_TRIGGER_LEFT;
             if (r.bTriggerR > 0) r.wButtons |= DS4_BUTTON_TRIGGER_RIGHT;
 
-            int16_t lx, ly, rx, ry;
-            memcpy(&lx, buf + 10, 2);
-            memcpy(&ly, buf + 12, 2);
-            memcpy(&rx, buf + 14, 2);
-            memcpy(&ry, buf + 16, 2);
-            r.bThumbLX = s16ToU8(lx);
-            r.bThumbLY = static_cast<uint8_t>(255u - s16ToU8(ly));
-            r.bThumbRX = s16ToU8(rx);
-            r.bThumbRY = static_cast<uint8_t>(255u - s16ToU8(ry));
+            const StickPos ls = ReadStick(buf + 10);
+            const StickPos rs = ReadStick(buf + 14);
+            r.bThumbLX = s16ToU8(ls.x);
+            // Y is inverted before it is quantised, not after: 255 - u8 turns
+            // a centred 128 into 127, so a stick at rest sat one step off on Y
+            // and nowhere near it on X.
+            r.bThumbLY = s16ToU8(NegI16(ls.y));
+            r.bThumbRX = s16ToU8(rs.x);
+            r.bThumbRY = s16ToU8(NegI16(rs.y));
 
             // Back paddles. As above, non-gamepad bindings fall through.
             auto applyBack = [&](const BackButtonBinding& binding) {
