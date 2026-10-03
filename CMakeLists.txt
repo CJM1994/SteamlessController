@@ -173,6 +173,28 @@ if (MSVC)
     set_target_properties(TriggerProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
 endif()
 
+# Stick deadzone checks — rest reads as nothing, the edge has no step, and full
+# deflection still reaches full. No controller needed.
+add_executable(StickDeadzoneProbe
+    src/probe/StickDeadzoneProbe.cpp
+)
+target_include_directories(StickDeadzoneProbe PRIVATE src)
+if (MSVC)
+    target_compile_options(StickDeadzoneProbe PRIVATE /W4 /WX /utf-8)
+    set_target_properties(StickDeadzoneProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
+endif()
+
+# StickRestProbe — measures what the sticks report at rest, so the stick
+# deadzone (issue #117) is sized from numbers rather than a guess.
+add_executable(StickRestProbe
+    src/probe/StickRestProbe.cpp
+)
+target_link_libraries(StickRestProbe PRIVATE SteamController)
+if (MSVC)
+    target_compile_options(StickRestProbe PRIVATE /W4 /WX /utf-8)
+    set_target_properties(StickRestProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
+endif()
+
 # PowerOffProbe — tries the firmware "turn off controller" command candidates and
 # watches whether the pad goes quiet, so Steam + Y can power it down (issue #106).
 add_executable(PowerOffProbe
