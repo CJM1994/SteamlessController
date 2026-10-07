@@ -354,6 +354,16 @@ struct ControllerProfile {
     // virtual controller down and builds it again, which a running game sees
     // as a controller unplug and replug.
     ControllerPlatform platform = ControllerPlatform::Xbox;
+
+    // Per-game profiles only: what the controller does while this game is in
+    // front. Default follows the tray's default behaviour. The default profile
+    // never reads this — its behaviour is a tray setting, not part of the
+    // bindings it carries.
+    //
+    // For the pad behaviours, `platform` above is kept in step with this so
+    // the virtual pad and the bindings that depend on it (the DS4 touchpad)
+    // agree on what kind of pad it is.
+    ControllerBehavior behavior = ControllerBehavior::Default;
     BackButtonConfig back;
     TrackpadSettings leftPad{
         .mode      = TrackpadMode::ScrollWheel,
@@ -374,6 +384,7 @@ struct ControllerProfile {
     bool operator==(const ControllerProfile& o) const {
         return useDefaultMappings == o.useDefaultMappings
             && platform == o.platform
+            && behavior == o.behavior
             && back.l4 == o.back.l4 && back.l5 == o.back.l5
             && back.r4 == o.back.r4 && back.r5 == o.back.r5
             && leftPad == o.leftPad && rightPad == o.rightPad

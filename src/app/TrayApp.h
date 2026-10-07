@@ -4,38 +4,23 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "ControllerPlatform.h"
 #include "DeviceRestart.h"
 #include "ForegroundWatcher.h"
-#include "GameLiveness.h"
 #include "GameProfiles.h"
 #include "RemapWindow.h"
 #include "SteamAppLocator.h"
+#include "SteamInputLease.h"
 #include "SteamWatcher.h"
 
 class ControllerManager;
 
-// Who decides when SteamlessController takes over the physical controller.
-enum class AutoMode {
-    Manual        = 0,  // tray toggle only
-    OffWhileSteam = 1,  // yield whenever steam.exe is running
-    OffOnlyInGame = 2,  // yield only while a game is running (needs admin to
-                        // wrest the device from a running Steam)
-    // Hold the controller only while a game the user has made a profile for is
-    // in front, and leave it alone the rest of the time.
-    //
-    // The one mode where a profile outranks yielding to Steam: the other two
-    // ask "is Steam busy", and this one asks "did the user say they want us
-    // driving this game". Having made a profile for it is that answer, so a
-    // running Steam is not a reason to refuse — which is the only way a Steam
-    // game launched from the Steam client can ever use one of our profiles.
-    // Needs the same elevated cycle helper OffOnlyInGame does, for the same
-    // reason: taking the device from a live Steam.
-    //
-    // Deliberately keyed on a profile existing rather than on the app being a
-    // game, because "is this a game" is the harder question and this mode is
-    // the place it will eventually be answered — widening the test is all it
-    // takes to become "off unless in a game".
-    OffUnlessProfile = 3,
+// When Steam's own presence replaces the default behaviour with Steam Input.
+// Persisted as "SteamOverride", so values are fixed; the intent is to grow
+// siblings (only while a Steam game runs, only while Steam is focused).
+enum class SteamOverride : uint32_t {
+    Off          = 0,
+    SteamRunning = 1,  // steam.exe is running, which includes Big Picture
 };
 
 class TrayApp {
@@ -93,37 +78,29 @@ private:
     void UpdateStartupRegistration();
 
     // Per-game profile switching. The foreground application decides which
-    // profile is live; see ForegroundWatcher for why focus rather than
-    // "is it running" is the question being asked.
+    // profile is live, and strictly so: nothing is held for a game that is
+    // still running behind something else.
     void OnForegroundChanged(const ForegroundIdentity& id);
-    // The profile id matching an application, or empty when none does.
+    // The profile id matching an application, or empty when none does — and
+    // always empty while game profiles are switched off, which is all it takes
+    // for every other path to fall back to the default.
     std::wstring MatchProfile(const ForegroundIdentity& id) const;
     // Record `gameId`'s profile as the selected one (empty selects the
     // default), and nothing else. Returns whether the selection changed.
     //
-    // Deliberately separate from applying it: whether we want the controller
-    // at all now depends on which profile is live, so the selection has to be
-    // on record before EvaluateControl can read it. Keeping the two joined is
-    // what made ReleaseControl and profile switching call each other.
+    // Deliberately separate from applying it: what the controller should be
+    // doing depends on which profile is live, so the selection has to be on
+    // record before EvaluateControl can read it.
     bool SelectProfile(const std::wstring& gameId);
-    // The selected profile — a game's if one is selected, else the default.
+    // The selected profile's bindings — a game's if one is selected and has
+    // controls of its own, else the default's.
     const ControllerProfile& ActiveProfile() const;
-    // What to actually apply: the selected profile, but wearing the pad type
-    // of whichever game is still running. Returned by value because it is a
-    // blend of two profiles rather than either of them, and every caller wants
-    // the blend — ActiveProfile stays the answer to "which profile did the
-    // user's foreground select", which is a different question.
+    // What to actually apply: ActiveProfile's bindings, wearing the pad type
+    // the resolved behaviour asks for.
     ControllerProfile EffectiveProfile() const;
-    // Start or stop holding the pad type for whatever the foreground matched,
-    // and keep the liveness timer running only while there is something to
-    // watch.
-    void UpdatePlatformHold(const ForegroundIdentity& id);
-    // Drop the hold and re-apply, so the pad type follows the profile again.
-    // The one moment the rebuild is free: the game that needed it has gone.
-    void ReleasePlatformHold(const wchar_t* why);
-    // Push the selected profile's bindings into ControllerManager. Safe while
-    // the controller is not ours, and called before acquiring rather than
-    // after so the pad comes up already carrying the right bindings.
+    // Push the effective profile into ControllerManager. Safe while the
+    // controller is not ours, and called before acquiring rather than after so
+    // the pad comes up already carrying the right bindings.
     void PushActiveProfile();
     // Re-resolve the foreground now, for the moments where the answer can
     // have changed while nobody was listening — taking the controller back,
@@ -135,27 +112,43 @@ private:
     // those happens again, which is the price of not polling the disk.
     void RefreshSteamApps();
 
-    // Control plumbing, shared by every mode.
-    void SetAutoMode(AutoMode mode);
-    // Whether Steam's current state leaves the controller available to us.
-    // A rule rather than a preference: no profile setting may vote itself
-    // into driving the pad alongside Steam Input, which is worse than not
-    // running at all (see ControllerManager's shared-handle note).
-    bool SteamAllowsControl(SteamState state) const;
-    // Do we want the controller right now? One question per mode — the tray
-    // toggle, Steam's state, or whether a game profile is in front — rather
-    // than one answer assembled from settings that override each other.
-    bool WantControlNow() const;
-    // Act on that answer — acquire, or schedule a release. The one place that
-    // turns intent into an acquire or a release, so every caller that can
-    // change the answer routes through here.
-    void EvaluateControl();
+    // What the controller should be doing right now, and which rule decided
+    // it (for the log and the tooltip). Never Default. Meaningless while the
+    // app is disabled, which EvaluateControl checks first.
+    ControllerBehavior ResolveBehavior(const char** rule = nullptr) const;
+    // The behaviour a game's profile asks for, or Default when there is no
+    // such profile or it follows the default.
+    ControllerBehavior ProfileBehavior(const std::wstring& gameId) const;
+    // Act on ResolveBehavior — take or drop the Steam Input lease, bring the
+    // virtual pad up or down — in the order that keeps the handoff clean. The
+    // one place that turns intent into action, so every caller that can change
+    // the answer routes through here.
+    //
+    // Turning anything off in response to the foreground waits out a short
+    // settle, so one stray focus change does not cost a release and re-acquire
+    // round trip. `immediate` skips it, for changes the user asked for
+    // directly from the menu.
+    void EvaluateControl(bool immediate = false);
+    // Lease first, then pad: whether the lease has got as far as it is going
+    // to for now, so an acquire will not find Steam still holding the device.
+    bool LeaseSettled() const;
     void ApplySteamState(SteamState state);
+    // Settings changed from the menu. Each saves, then re-evaluates at once.
+    void SetEnabled(bool enabled);
+    void SetDefaultBehavior(ControllerBehavior behavior);
+    void SetGameBehavior(const std::wstring& gameId, ControllerBehavior behavior);
+    void SetUseGameProfiles(bool use);
+    void SetSteamOverride(SteamOverride value);
+    // Re-derive the tray icon and tooltip from everything that feeds them —
+    // the controller, the lease, and the settings.
+    void RefreshTrayIcon();
     void TryAcquireController(uint32_t stateWaitMs = 250);
     // Take a dock Steam still holds, once the controller is ours.
     void CycleUnheldDocks();
-    void EnableFromUser();
-    void ReleaseControl();
+    // skipCycle: Steam will be told to rediscover controllers some other way
+    // (the gate does it when the lease goes), or is blocked from them anyway,
+    // so the device cycle that hands the controller back is not needed.
+    void ReleaseControl(bool skipCycle = false);
     void RecoverStrandedDevices();
     void WriteHeartbeat();
     // Carry out whatever the pending-disable record asks for: in process when
@@ -184,12 +177,24 @@ private:
     HICON                              m_iconOff    = nullptr;
     HICON                              m_iconOn     = nullptr;
     HICON                              m_iconShared = nullptr;
-    AutoMode                           m_autoMode   = AutoMode::Manual;
-    // Do we want the controller right now? Acquiring is asynchronous — a
+    HICON                              m_iconSteam    = nullptr;
+    HICON                              m_iconDisabled = nullptr;
+
+    // Settings. Enabled off means hands off entirely: no pad, no lease.
+    bool                               m_enabled         = true;
+    ControllerBehavior                 m_defaultBehavior = ControllerBehavior::Xbox;
+    bool                               m_useGameProfiles = true;
+    SteamOverride                      m_steamOverride   = SteamOverride::Off;
+
+    // Holds Steam off the controllers while the resolved behaviour wants it.
+    SteamInputLease                    m_lease;
+    // The last resolution logged, so a line is written on a change rather
+    // than on every foreground switch.
+    std::string                        m_lastResolution;
+
+    // Do we want the virtual pad right now? Acquiring is asynchronous — a
     // blocked claim escalates to a device cycle that lands seconds later as a
     // WM_DEVICECHANGE — so intent has to outlive the call that started it.
-    // Auto modes derive this from Steam's state; manual mode from the tray
-    // toggle, which is otherwise nowhere on record.
     bool                               m_wantControl    = false;
     int                                m_acquireRetries = 0;
     // Dock-only cycles spent on the current takeover; see CycleUnheldDocks.
@@ -206,12 +211,6 @@ private:
     bool                               m_vigemBalloonShown     = false;
     bool                               m_startupEnabled   = false;
     int                                m_startupMechanism = 0;  // 0 none, 1 Run key, 2 elevated task
-    // Manual mode only: acquire the controller automatically at startup rather
-    // than waiting for the tray toggle. Defaults on so a fresh install lands
-    // enabled; LoadSettings reads a different default once the registry key
-    // exists at all, so an upgrade keeps today's off-until-toggled behaviour
-    // unless the user opts in.
-    bool                               m_enableOnLaunch = true;
     // Every balloon this app raises, not just the disconnect and stall ones
     // it started out covering — a per-game profile loading is announced
     // through it too.
@@ -242,6 +241,9 @@ private:
     // Devnode found disabled when the menu was last built, so the command
     // handler and the menu agree on what "re-enable" refers to.
     std::wstring                       m_disabledDeviceNode;
+    // The game profile each per-game menu item refers to, captured when the
+    // menu was built so a command cannot land on a different profile.
+    std::vector<std::wstring>          m_menuProfileIds;
     std::mutex                         m_alertMutex;   // guards the two alert strings
     std::wstring                       m_alertTitle;   // set on read threads,
     std::wstring                       m_alertText;    // consumed on WM_ALERT
@@ -281,24 +283,9 @@ private:
     // rather than on every foreground switch.
     std::wstring                       m_lastAppliedDescription;
 
-    // Which game's profile decides the kind of virtual pad, for as long as
-    // that game is running. Set when a profile matches the foreground and kept
-    // across alt-tabs, because a platform change rebuilds the pad and a
-    // running game reads that as its controller being unplugged.
-    //
-    // Only the platform is held. Bindings still follow the foreground, so
-    // alt-tabbing to the desktop still hands the desktop its own controls —
-    // which matters, since the default profile is the one that makes the pads
-    // a mouse and a scroll wheel.
-    //
-    // Nothing here helps AutoMode::OffUnlessProfile, whose whole design is to
-    // release the physical controller the moment a profiled game is not in
-    // front. That destroys the virtual pad outright, so there is no pad left
-    // to hold a type for. Left that way on purpose: it is the most restrictive
-    // mode and being restrictive is what it is for.
-    GameLiveness                       m_platformHold;
-
-    static constexpr UINT IDM_TOGGLE        = 1001;
+    // 1001 was the retired "Enable/Disable Steamless Mode" toggle, and 1010-
+    // 1012, 1016 and 1017 the retired control modes and "Enable on Launch".
+    // All left unused rather than reassigned, like 1003/1005 below.
     static constexpr UINT IDM_EXIT          = 1002;
     // 1003 and 1005 were the retired "Enable Trackpad Mouse" and "Use Left
     // Trackpad Instead" items — left unused rather than reassigned, so a
@@ -308,14 +295,20 @@ private:
     // 1008 and 1009 were the retired "Controller Platform" submenu items,
     // now a dropdown in the customization window. Left unused rather than
     // reassigned, like 1003/1005 above.
-    static constexpr UINT IDM_MODE_MANUAL   = 1010;
-    static constexpr UINT IDM_MODE_STEAM    = 1011;
-    static constexpr UINT IDM_MODE_GAME     = 1012;
     static constexpr UINT IDM_OPENLOG       = 1013;
     static constexpr UINT IDM_NOTIFICATIONS = 1014;
     static constexpr UINT IDM_ENABLE_DEVICE = 1015;
-    static constexpr UINT IDM_MODE_PROFILE  = 1016;
-    static constexpr UINT IDM_ENABLE_ON_LAUNCH = 1017;
+    static constexpr UINT IDM_ENABLED          = 1018;
+    static constexpr UINT IDM_USE_PROFILES     = 1019;
+    static constexpr UINT IDM_STEAM_OVERRIDE   = 1020;
+    static constexpr UINT IDM_EDIT_PROFILES    = 1021;
+    // One per ControllerBehavior value, offset by the value itself.
+    static constexpr UINT IDM_DEFAULT_BASE     = 1100;
+    // Game profile i, behaviour b: IDM_PROFILE_BASE + i * IDM_PROFILE_STRIDE + b,
+    // with i indexing m_menuProfileIds as it was when the menu was built.
+    static constexpr UINT IDM_PROFILE_BASE     = 2000;
+    static constexpr UINT IDM_PROFILE_STRIDE   = 8;
+    static constexpr UINT IDM_PROFILE_MAX      = 500;
     static constexpr UINT WM_TRAY           = WM_APP + 1;
     static constexpr UINT WM_STEAMSTATE     = WM_APP + 2;
     static constexpr UINT WM_ALERT          = WM_APP + 3;
@@ -323,6 +316,8 @@ private:
     // read thread, and the remap window is WebView2, which must only be
     // touched on the UI thread.
     static constexpr UINT WM_CONTROLSTATE   = WM_APP + 4;
+    // The lease worker changed state; posted from its thread.
+    static constexpr UINT WM_LEASESTATE     = WM_APP + 5;
     static constexpr UINT TRAY_UID          = 1;
     static constexpr UINT_PTR IDT_ACQUIRE         = 1;
     static constexpr UINT_PTR IDT_ACQUIRE_VERDICT = 2;
@@ -331,7 +326,7 @@ private:
     static constexpr UINT_PTR IDT_RELEASE_GRACE   = 5;
     static constexpr UINT_PTR IDT_STEAM_RECONCILE = 6;
     static constexpr UINT_PTR IDT_CYCLE_WATCHDOG  = 7;
-    static constexpr UINT_PTR IDT_GAME_LIVENESS   = 8;
+    // 8 was IDT_GAME_LIVENESS, retired with the running-game hold.
     static constexpr UINT_PTR IDT_DOCK_CYCLE      = 9;
     // Long enough that idling for a month costs a fraction of the log's 512 KB,
     // short enough to bound when the app stopped responding to within a
@@ -371,19 +366,14 @@ private:
     // waiting through the whole thing costs a handful of log lines, quick
     // enough that the app picks a new driver up on its own.
     static constexpr UINT VIGEM_RETRY_MS = 30000;
-    // Grace before a profile-driven release actually happens. Quick to engage
-    // and slow to disengage, the same asymmetry SteamWatcher uses for Steam
-    // going away — because each release and re-acquire round trip unplugs and
-    // replugs the virtual pad, which a running game sees as the controller
-    // being yanked out. Alt-tabbing to a browser mid-game is common enough
-    // that doing it immediately would read as a bug. Steam turning up is the
-    // one release that skips this; see EvaluateControl.
-    static constexpr UINT RELEASE_GRACE_MS = 5000;
-    // How often to ask whether the game holding the pad type is still there.
-    // Deliberately lazy: nothing is watching the pad in the moment a game
-    // exits, so noticing a second or two late costs nothing, and the check is
-    // one wait on a handle we already hold.
-    static constexpr UINT LIVENESS_POLL_MS = 2000;
+    // Settle before a foreground-driven change turns anything off — dropping
+    // the pad, changing its type, or releasing the lease. On top of the
+    // ForegroundWatcher's own 400 ms debounce. Short, because the change is
+    // what the user is waiting to see; non-zero, because each release costs
+    // Steam a rediscovery and each pad drop is an unplug the game can see, and
+    // one stray focus change (a launcher splash, a UAC prompt) should not buy
+    // a round trip of both. Engaging is never delayed.
+    static constexpr UINT RELEASE_GRACE_MS = 1000;
     // Minimum spacing between device cycles. A cycle is asynchronous, so
     // without this the arrivals it generates re-enter the acquire path and
     // fire another one on top of it.

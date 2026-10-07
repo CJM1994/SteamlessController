@@ -1185,16 +1185,17 @@ function renderOffbar(){
   // saves on its own — and it does not; Apply does. A banner about one thing
   // being off is the wrong place to imply something else is automatic.
   if(controlManual){
-    text.innerHTML='<b>Steamless mode is off.</b> Nothing on this page is '+
-                   'driving your controller yet - the trackpads, paddles '+
-                   'and buttons below take effect once it is on.';
+    text.innerHTML='<b>SteamlessController is disabled.</b> Nothing on this page '+
+                   'is driving your controller - the trackpads, paddles and '+
+                   'buttons below take effect once it is enabled.';
     if(btn) btn.style.display='';
   }else{
-    // Not ours to switch on: an auto mode owns the decision, and a button here
-    // would either lie or fight it a moment later.
-    text.innerHTML='<b>Steamless mode is off right now.</b> Control Mode is set '+
-                   'to one of the automatic options, so it turns on by itself '+
-                   'when the conditions are met. Settings below take effect then.';
+    // Not ours to switch on: the behaviour in effect drives no pad, and a
+    // button here would either lie or fight the tray a moment later.
+    text.innerHTML='<b>No virtual controller right now.</b> The behaviour in '+
+                   'effect is Lizard Mode or Steam Input, set from the tray icon. '+
+                   'Settings below apply whenever an Xbox or PlayStation '+
+                   'behaviour is in effect.';
     if(btn) btn.style.display='none';
   }
 }
@@ -2561,9 +2562,9 @@ void RemapWindow::OnWebMessage(const std::wstring& raw) {
         }
 
     } else if (type == "requestEnable") {
-        // Only ever offered in manual mode, but checked here too: the mode can
-        // change while the window is up, and a stale button must not reach
-        // past the tray's own rule about who decides.
+        // Only ever offered while the app is disabled, but checked here too:
+        // that can change while the window is up, and a stale button must not
+        // reach past the tray's own rule about who decides.
         if (m_controlManual && m_onRequestEnable) m_onRequestEnable();
 
     } else if (type == "browseExe") {
@@ -2576,13 +2577,13 @@ void RemapWindow::OnWebMessage(const std::wstring& raw) {
 // page comes up — the window is usually opened while the state is already
 // settled, so waiting for the next change would leave the banner wrong until
 // something unrelated happened.
-void RemapWindow::SetControlState(bool enabled, bool manual) {
+void RemapWindow::SetControlState(bool enabled, bool appDisabled) {
     m_controlEnabled = enabled;
-    m_controlManual  = manual;
+    m_controlManual  = appDisabled;
     if (!m_webview) return;
     PostToWebView(std::wstring(L"{\"type\":\"controlState\",\"enabled\":\"")
                   + (enabled ? L"1" : L"0")
-                  + L"\",\"manual\":\"" + (manual ? L"1" : L"0") + L"\"}");
+                  + L"\",\"manual\":\"" + (appDisabled ? L"1" : L"0") + L"\"}");
 }
 void RemapWindow::PostToWebView(const std::wstring& jsonStr) {
     if (m_webview) m_webview->PostWebMessageAsString(jsonStr.c_str());

@@ -272,6 +272,7 @@ an index→id table rebuilt on every menu open). Retired IDs (1001, 1010–1012,
 2. Settings model + migration, `ResolveBehavior`, and the `EvaluateControl`
    rewrite (lease ordering, immediate vs settle).
 3. Tray menu (Enabled, Default Behaviour, Game Profiles) and the new icons.
+   *(Done together with step 2: removing the old modes forced the menu change.)*
 4. Behaviour in game profiles, its persistence, and the Customize window
    (dropdown moved off the default profile).
 5. Gate deployment (installer + helper verb) and the tray status line.

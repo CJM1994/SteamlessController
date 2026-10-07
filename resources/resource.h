@@ -5,6 +5,10 @@
 // Game mode is live, but on a handle shared with another writer (typically
 // Steam) rather than an exclusive one — see ControllerManager::IsGameModeShared.
 #define IDI_ICON_SHARED 103
+// No virtual pad and no Steam Input lease: Steam has the controller.
+#define IDI_ICON_STEAM    104
+// The tray's Enabled item is off; the app is doing nothing at all.
+#define IDI_ICON_DISABLED 105
 
 // One definition of the version, for the VERSIONINFO resource in app.rc and for
 // the startup line in the event log. Both matter: a build with no version stamp

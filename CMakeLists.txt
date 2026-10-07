@@ -254,11 +254,11 @@ add_executable(SteamlessController WIN32
     src/app/TouchKeyboard.cpp
     src/app/InputInjection.cpp
     src/app/SteamWatcher.cpp
+    src/app/SteamInputLease.cpp
     src/app/DeviceRestart.cpp
     src/app/EventLog.cpp
     src/app/ForegroundWatcher.cpp
     src/app/GameLibrary.cpp
-    src/app/GameLiveness.cpp
     src/app/GameProfiles.cpp
     src/app/HandleFinder.cpp
     src/app/LauncherGames.cpp

@@ -111,6 +111,14 @@ std::map<std::wstring, ControllerProfile> Load() {
             p.useDefaultMappings = ReadDw(child, L"UseDefaultMappings", 0) != 0;
             p.platform = ReadDw(child, L"Platform", 0) != 0 ? ControllerPlatform::PlayStation
                                                             : ControllerPlatform::Xbox;
+            // Absent on profiles written before behaviours existed. Those
+            // either followed the default (and keep doing so) or drove a pad of
+            // their own platform, which is what they go on doing.
+            const ControllerBehavior legacy = p.useDefaultMappings
+                                                  ? ControllerBehavior::Default
+                                                  : BehaviorForPlatform(p.platform);
+            p.behavior = BehaviorFromDword(
+                ReadDw(child, L"Behavior", static_cast<DWORD>(legacy)), legacy);
             p.back.l4 = BackButtonBinding::Unpack(ReadDw(child, L"L4", unbound));
             p.back.l5 = BackButtonBinding::Unpack(ReadDw(child, L"L5", unbound));
             p.back.r4 = BackButtonBinding::Unpack(ReadDw(child, L"R4", unbound));
@@ -157,6 +165,7 @@ void Save(const std::map<std::wstring, ControllerProfile>& profiles) {
             WriteDw(child, L"UseDefaultMappings", p.useDefaultMappings ? 1 : 0);
             WriteDw(child, L"Platform",
                     p.platform == ControllerPlatform::PlayStation ? 1 : 0);
+            WriteDw(child, L"Behavior", static_cast<DWORD>(p.behavior));
             WriteDw(child, L"L4", p.back.l4.Pack());
             WriteDw(child, L"L5", p.back.l5.Pack());
             WriteDw(child, L"R4", p.back.r4.Pack());

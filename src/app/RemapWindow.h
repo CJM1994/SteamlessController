@@ -71,10 +71,11 @@ public:
     // it was written down was the event log, which nobody reads while they are
     // in the middle of testing.
     //
-    // `manual` decides what can be offered about it: in manual mode the window
-    // can turn it on, and in the auto modes it is not the window's to change,
-    // so it says what does decide instead.
-    void SetControlState(bool enabled, bool manual);
+    // `appDisabled` decides what can be offered about it: with the app
+    // switched off in the tray, the window can switch it back on. Otherwise
+    // the pad is off because the behaviour in effect (Lizard Mode or Steam
+    // Input) drives none, which is the tray's to change, so it says so.
+    void SetControlState(bool enabled, bool appDisabled);
 
     // The user asked to turn Steamless mode on from inside the window. Routed
     // back out rather than handled here: enabling means acquiring the device,
