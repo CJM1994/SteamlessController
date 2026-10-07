@@ -29,6 +29,14 @@ struct PickerEntry {
 
 class RemapWindow {
 public:
+    // Which profiles a given opening offers. Each is its own window title and
+    // its own entry point in the tray menu:
+    //   Default  the default profile alone, no picker
+    //   Games    the game profiles, with the picker to choose or add one; the
+    //            default is not offered
+    //   Game     one game's profile alone, no picker
+    enum class EditScope { Default, Games, Game };
+
     RemapWindow() = default;
     ~RemapWindow();
     RemapWindow(const RemapWindow&) = delete;
@@ -46,10 +54,15 @@ public:
     // deleteCallback fires when the user removes a game's profile; its id is
     // one that was in gameProfiles, and never empty — the default profile
     // cannot be removed.
+    //
+    // Opening again while the window is up switches it to the new scope; the
+    // page asks first if that would throw away unsaved edits. gameId names the
+    // profile for EditScope::Game and is ignored otherwise.
     void Open(HINSTANCE hInst, ControllerManager* mgr, const ControllerProfile& profile,
               std::map<std::wstring, ControllerProfile> gameProfiles,
               std::function<void(const std::wstring&, const ControllerProfile&)> applyCallback,
-              std::function<void(const std::wstring&)> deleteCallback);
+              std::function<void(const std::wstring&)> deleteCallback,
+              EditScope scope = EditScope::Default, const std::wstring& gameId = {});
 
     void BringToFront() const;
     // Open in the sense that matters to callers: visible and being edited.
@@ -98,6 +111,14 @@ private:
     // on disk and marked GameSource::Manual, so a profile that is doing its
     // job is not labelled as broken.
     void AppendOrphanProfiles();
+
+    // A picker entry for every saved profile not already in the list, before
+    // the enumeration has had a chance to supply them. The Games and Game
+    // scopes open on a profile, and its entry has to exist for the page to
+    // name it and for an Apply against it to be accepted. The enumeration
+    // replaces these with the real thing when it lands, keeping the tokens.
+    void SeedProfileEntries();
+    std::wstring ScopeTitle() const;
 
     // Runs GameLibrary::EnumerateInstalled() on a background thread and posts
     // the result back as WM_GAMES_READY. Started once per opening.
@@ -173,6 +194,11 @@ private:
     // sending the list and the user choosing from it. Same token discipline.
     std::vector<PickerEntry>                   m_runningApps;
     std::map<std::wstring, ControllerProfile>  m_gameProfiles;
+    EditScope                                  m_scope = EditScope::Default;
+    // The installed list has landed for this opening. m_games alone cannot
+    // say so once profile entries are seeded into it ahead of the list.
+    bool                                       m_enumerated = false;
+    std::wstring                               m_scopeGameId;
     std::function<void(const std::wstring&, const ControllerProfile&)> m_applyCallback;
     std::function<void(const std::wstring&)> m_deleteCallback;
     std::function<void()> m_onClose;

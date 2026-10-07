@@ -97,6 +97,8 @@ public:
         GateMissing,    // wanted, Steam is running without the gate loaded
         Failed,         // wanted, gate present but refused or misbehaved; retrying
         Blocking,       // lease held: Steam has no access to controllers
+        Releasing,      // lease released; waiting for Steam to reopen its
+                        // controllers (bounded), then Off
     };
     static const char* Describe(State state);
 
@@ -134,7 +136,13 @@ private:
     void  Worker();
     // Returns how long to wait before trying again, INFINITE once held.
     DWORD TryAcquire(Held& held);
-    void  Release(Held& held);
+    // Returns whether Steam was asked to rediscover — this was the last
+    // lease — and so whether there is a reopen worth waiting for.
+    bool  Release(Held& held);
+    // After the last lease goes: wait until Steam has HID handles open again,
+    // so whoever is watching knows the handoff is finished rather than merely
+    // started. Gives up early if blocking is wanted again or on Stop.
+    void  WaitForSteamReopen(DWORD pid);
     void  SetState(State state);
 
     ChangedFn               m_onChanged;
@@ -161,4 +169,9 @@ private:
     // table, and the last release triggers rediscovery — both are real work
     // inside Steam, so allow them time before calling the gate unresponsive.
     static constexpr DWORD EXCHANGE_TIMEOUT_MS = 10000;
+    // The gate's second discovery pass lands about 2.2 s after release; this
+    // covers it with room to spare, and caps how long Releasing can last when
+    // Steam has nothing to reopen (no controller connected, say).
+    static constexpr DWORD REOPEN_TIMEOUT_MS = 4000;
+    static constexpr DWORD REOPEN_POLL_MS    = 250;
 };

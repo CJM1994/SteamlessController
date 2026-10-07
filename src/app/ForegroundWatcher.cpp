@@ -5,7 +5,49 @@ ForegroundWatcher* ForegroundWatcher::s_instance = nullptr;
 // The whole of resolving a window to an application now lives in
 // ProcessIdentity, shared with the remap window's running-app picker.
 ForegroundIdentity ForegroundWatcher::Current() {
-    return ProcessIdentity::ForWindow(GetForegroundWindow());
+    return ProcessIdentity::ForWindow(FrontWindow());
+}
+
+// Windows that fill the screen without being anything the user is doing.
+static bool IsShellBackground(HWND hwnd) {
+    if (hwnd == GetShellWindow() || hwnd == GetDesktopWindow()) return true;
+    wchar_t cls[32] = {};
+    GetClassNameW(hwnd, cls, 32);
+    return wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0
+        || wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0;
+}
+
+HWND ForegroundWatcher::FrontWindow() {
+    HWND focus = GetForegroundWindow();
+    if (!focus) return focus;
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(focus, MONITOR_DEFAULTTONEAREST), &mi)) return focus;
+    const RECT& screen = mi.rcMonitor;
+
+    // What a click at the centre would land on. WindowFromPoint already skips
+    // hidden and click-through windows, which is what keeps game overlays —
+    // FPS counters, chat overlays — from ever being taken for the game.
+    const POINT centre{ (screen.left + screen.right) / 2, (screen.top + screen.bottom) / 2 };
+    HWND shown = GetAncestor(WindowFromPoint(centre), GA_ROOT);
+    if (!shown || shown == focus || IsShellBackground(shown)) return focus;
+
+    DWORD focusPid = 0, shownPid = 0;
+    GetWindowThreadProcessId(focus, &focusPid);
+    GetWindowThreadProcessId(shown, &shownPid);
+    // Another window of the same application is the same answer, and one of
+    // ours (the mode overlay, the settings window) is never the user's game.
+    if (shownPid == focusPid || shownPid == GetCurrentProcessId()) return focus;
+
+    RECT r{}, overlap{};
+    GetWindowRect(shown, &r);
+    if (!IntersectRect(&overlap, &r, &screen)) return focus;
+    const long long covered = static_cast<long long>(overlap.right - overlap.left)
+                            * (overlap.bottom - overlap.top);
+    const long long area    = static_cast<long long>(screen.right - screen.left)
+                            * (screen.bottom - screen.top);
+    return covered * 100 >= area * COVER_PERCENT ? shown : focus;
 }
 
 void CALLBACK ForegroundWatcher::HookProc(HWINEVENTHOOK, DWORD event, HWND hwnd,
@@ -25,7 +67,20 @@ LRESULT CALLBACK ForegroundWatcher::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
         s_instance->OnDebounceElapsed();
         return 0;
     }
+    if (msg == WM_TIMER && wp == IDT_POLL && s_instance) {
+        s_instance->OnPoll();
+        return 0;
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void ForegroundWatcher::OnPoll() {
+    const HWND front = FrontWindow();
+    if (front == m_lastFront) return;
+    m_lastFront = front;
+    // Through the debounce, like a foreground event: a window shuffle mid-
+    // launch settles before anything is read from it.
+    SetTimer(m_hwnd, IDT_DEBOUNCE, DEBOUNCE_MS, nullptr);
 }
 
 void ForegroundWatcher::OnDebounceElapsed() {
@@ -73,7 +128,9 @@ bool ForegroundWatcher::Start(ChangedFn onChange) {
         return false;
     }
 
-    m_last = Current();
+    m_last      = Current();
+    m_lastFront = FrontWindow();
+    SetTimer(m_hwnd, IDT_POLL, POLL_MS, nullptr);
     return true;
 }
 
@@ -84,10 +141,12 @@ void ForegroundWatcher::Stop() {
     }
     if (m_hwnd) {
         KillTimer(m_hwnd, IDT_DEBOUNCE);
+        KillTimer(m_hwnd, IDT_POLL);
         DestroyWindow(m_hwnd);
         m_hwnd = nullptr;
     }
     if (s_instance == this) s_instance = nullptr;
     m_onChange = nullptr;
-    m_last     = {};
+    m_last      = {};
+    m_lastFront = nullptr;
 }

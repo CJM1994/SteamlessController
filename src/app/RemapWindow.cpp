@@ -85,6 +85,12 @@ button{font-family:'Barlow',system-ui,sans-serif;cursor:pointer;border:none;back
 .inherit-note{font-size:12px;color:#7d8b96;padding:8px 0 14px 26px;line-height:1.45;}
 .combo-badge{margin-left:8px;font-size:10px;font-weight:700;letter-spacing:.6px;color:#c9a86a;border:1px solid rgba(201,168,106,.35);border-radius:3px;padding:1px 5px;}
 .missing-note{margin-top:11px;font-size:12px;color:#c9a86a;line-height:1.45;}
+.mode-note{padding:11px 13px;border-radius:8px;background:rgba(80,160,90,.12);border:1px solid rgba(80,160,90,.4);font-size:12.5px;color:#a9d8ae;line-height:1.45;}
+.mode-note b{color:#d4f5d7;}
+.pick-note{display:none;margin-top:11px;font-size:12.5px;color:#7d8b96;line-height:1.45;}
+/* Edit Game Profiles with nothing chosen yet: only the picker makes sense. */
+.no-selection .pick-note{display:block;}
+.no-selection #settings,.no-selection #inherit-group,.no-selection #footer,.no-selection #mode-note{display:none !important;}
 /* Says how a directional pad splits its surface, which is the one thing about
    these rows that cannot be worked out from their labels. */
 .pad-note{font-size:12px;color:#7d8b96;padding:2px 0 10px;line-height:1.45;}
@@ -217,7 +223,7 @@ R"HTML(
   <div class="left">
     <div class="glyph"><div class="glyph-dot"></div></div>
     <span class="tb-title">SteamlessController</span>
-    <span class="tb-sub">&#8212; Customize Controls</span>
+    <span class="tb-sub" id="tb-sub">&#8212; Edit Default Profile</span>
   </div>
   <div class="winctls">
     <button class="winctl" id="btn-min" title="Minimize">&#8211;</button>
@@ -227,15 +233,15 @@ R"HTML(
 
 <div id="body">
   <div>
-    <h2>Customize Controls</h2>
+    <h2 id="page-title">Edit Default Profile</h2>
     <p class="instr">Click <b>Rebind</b> on any button, then press any gamepad button on your controller &#8212; or any key on your keyboard, or your mouse's middle or thumb buttons. The new binding shows up here instantly. Pick <b>Off</b> to stop a button doing anything at all.</p>
   </div>
   <div class="offbar" id="offbar">
     <div class="offbar-text" id="offbar-text"></div>
     <button class="offbar-btn" id="offbar-btn">Enable</button>
   </div>
-  <div class="group">
-    <div class="group-label">APPLY TO</div>
+  <div class="group" id="apply-group" style="display:none;">
+    <div class="group-label">GAME</div>
     <div class="combo-wrap">
       <button class="combo-toggle" id="combo-toggle">
         <span id="combo-current">Default (all other games)</span>
@@ -251,7 +257,9 @@ R"HTML(
       </div>
     </div>
     <div class="missing-note" id="missing-note" style="display:none;">This game wasn't found on this PC. Its profile is kept, and will start working again if the game comes back. Delete this if the game won't be coming back.</div>
+    <div class="pick-note" id="pick-note">Choose a game above to edit its profile, or search for one to make a new profile for it.</div>
   </div>
+  <div class="mode-note" id="mode-note" style="display:none;"></div>
   <div class="group" id="inherit-group" style="display:none;">
     <div class="group-label">MAPPINGS</div>
     <div class="inherit-row">
@@ -713,18 +721,10 @@ if(window.chrome&&window.chrome.webview){
   window.chrome.webview.addEventListener('message',function(e){
     var msg=JSON.parse(e.data);
     if(msg.type==='init'){
-      keyLabels=msg.labels||{};
-      GAMES=msg.games||[];
-      PROFILES=msg.profiles||PROFILES;
-      // Set by C++, not assumed: when the enumeration beat WebView2's startup
-      // the list is already in this message and no 'games' message follows.
-      gamesPending=(msg.pending==='1');
-      currentGame='';
-      loadProfileInto(PROFILES['']||{});
-      closeCombo();
-      renderComboLabel();
-      renderModeSelects();
-      renderAll();
+      // A second init is the tray switching an open window to another
+      // profile; edits in flight get the same prompt as picking another game.
+      if(initialized) guard(function(){applyInit(msg);});
+      else applyInit(msg);
     } else if(msg.type==='controlState'){
       controlOn     = msg.enabled==='1';
       controlManual = msg.manual==='1';
@@ -919,6 +919,12 @@ function loadProfileInto(p){
 // transient "Applied" feedback.
 function saveCurrent(){
   var snapshot=currentProfile();
+  // The mode is the tray's and never edited here, but the note about it reads
+  // from PROFILES, so it is carried across rather than dropped by the save.
+  if(currentGame!==''){
+    var before=PROFILES[currentGame];
+    snapshot.mode=before&&before.mode?before.mode:'steamless';
+  }
   var p={}; for(var k in PROFILES) p[k]=PROFILES[k];
   p[currentGame]=snapshot;
   PROFILES=p;
@@ -992,8 +998,85 @@ function removeCurrent(){
   if(gameMissing(gone))
     GAMES=GAMES.filter(function(g){return g.id!==gone;});
   postMsg({type:'delete',game:gone});
-  selectGame('');
+  // Where to go once the profile is gone depends on what this window is for:
+  // a window opened for this one game has nothing left to show.
+  if(SCOPE==='game') postMsg({type:'close'});
+  else if(SCOPE==='games') selectFirstProfile();
+  else selectGame('');
   renderCombo();  // it stops being a pinned entry
+}
+)HTML"
+// Third split: which profiles this opening of the window is for. See the
+// EditScope note in RemapWindow.h.
+R"HTML(
+// ---- Edit scope ----
+// 'default' (the default profile alone), 'games' (the game profiles, with the
+// picker) or 'game' (one game's profile alone). Set by every init.
+var SCOPE='default';
+var SCOPE_GAME='';
+// Edit Game Profiles with nothing chosen: no profiles yet, or the last one
+// was just deleted. Everything but the picker is hidden until one is picked.
+var noSelection=false;
+var initialized=false;
+function applyInit(msg){
+  keyLabels=msg.labels||{};
+  GAMES=msg.games||[];
+  PROFILES=msg.profiles||PROFILES;
+  // Set by C++, not assumed: when the enumeration beat WebView2's startup
+  // the list is already in this message and no 'games' message follows.
+  gamesPending=(msg.pending==='1');
+  SCOPE=msg.scope||'default';
+  SCOPE_GAME=msg.game||'';
+  initialized=true;
+  closeCombo();
+  renderScope();
+  if(SCOPE==='game'&&SCOPE_GAME) selectGame(SCOPE_GAME);
+  else if(SCOPE==='games') selectFirstProfile();
+  else selectGame('');
+}
+function scopeTitle(){
+  if(SCOPE==='games') return 'Edit Game Profiles';
+  if(SCOPE==='game') return 'Edit Profile \u2014 '+(gameName(SCOPE_GAME)||'Game');
+  return 'Edit Default Profile';
+}
+function renderScope(){
+  var title=scopeTitle();
+  document.getElementById('page-title').textContent=title;
+  document.getElementById('tb-sub').textContent='\u2014 '+title;
+  // The picker is only for choosing among games; the other two scopes are
+  // one profile each, named in the title.
+  document.getElementById('apply-group').style.display=(SCOPE==='games')?'':'none';
+}
+// The first saved game by name, or the empty state when there is none.
+function selectFirstProfile(){
+  var pinned=pinnedGames().slice().sort(function(a,b){
+    return a.name.toLowerCase()<b.name.toLowerCase()?-1:1;
+  });
+  if(pinned.length) selectGame(pinned[0].id);
+  else selectNone();
+}
+function selectNone(){
+  cancelListening();
+  noSelection=true;
+  currentGame='';
+  // Nothing loaded means nothing to call unsaved.
+  savedProfile=null;
+  document.body.classList.add('no-selection');
+  renderComboLabel();
+}
+// Says so when the game on screen is set to a mode that drives no virtual
+// pad, since everything on this page would then do nothing for it.
+function renderModeNote(){
+  var el=document.getElementById('mode-note');
+  if(!el) return;
+  var p=currentGame!==''?PROFILES[currentGame]:null;
+  var mode=p&&p.mode?p.mode:'steamless';
+  if(!p||mode==='steamless'){el.style.display='none';return;}
+  el.innerHTML='This game is set to <b>'+(mode==='steam'?'Steam Input Mode':'Lizard Mode')+
+               '</b>, so the controls below are not used while it is in front. '+
+               'Switch it to Steamless Mode from the tray icon, under Game Profiles, '+
+               'to use them.';
+  el.style.display='';
 }
 )HTML"
 // Second split, same C2026 limit as above — the script outgrew one literal
@@ -1006,6 +1089,7 @@ function gameName(gameId){
   return '';
 }
 function currentLabel(){
+  if(noSelection) return 'Choose a game\u2026';
   return currentGame===''?'Default (all other games)':(gameName(currentGame)||'Unknown game');
 }
 function renderComboLabel(){
@@ -1036,7 +1120,8 @@ function renderCombo(){
 
   var pinned=pinnedGames();
   if(q) pinned=pinned.filter(function(g){return g.name.toLowerCase().indexOf(q)>=0;});
-  var showDefault=!q||'default (all other games)'.indexOf(q)>=0;
+  // Edit Game Profiles leaves the default out: it has an editor of its own.
+  var showDefault=SCOPE!=='games'&&(!q||'default (all other games)'.indexOf(q)>=0);
 
   if(showDefault||pinned.length){
     html+='<div class="combo-section-label">PROFILES</div><div class="combo-list">';
@@ -1134,6 +1219,8 @@ function pickGame(gameId){
   guard(function(){selectGame(gameId);});
 }
 function selectGame(gameId){
+  noSelection=false;
+  document.body.classList.remove('no-selection');
   currentGame=gameId;
   // A game with no profile of its own starts from the default's settings \u2014
   // loadProfileInto copies, so editing here cannot mutate the cached profile.
@@ -1192,10 +1279,9 @@ function renderOffbar(){
   }else{
     // Not ours to switch on: the behaviour in effect drives no pad, and a
     // button here would either lie or fight the tray a moment later.
-    text.innerHTML='<b>No virtual controller right now.</b> The behaviour in '+
-                   'effect is Lizard Mode or Steam Input, set from the tray icon. '+
-                   'Settings below apply whenever an Xbox or PlayStation '+
-                   'behaviour is in effect.';
+    text.innerHTML='<b>No virtual controller right now.</b> The controller is '+
+                   'in Lizard Mode or Steam Input Mode, chosen from the tray icon. '+
+                   'Settings below apply whenever Steamless Mode is in effect.';
     if(btn) btn.style.display='none';
   }
 }
@@ -1218,6 +1304,7 @@ function renderInherit(){
   // its profile is being kept rather than quietly ignored.
   var miss=document.getElementById('missing-note');
   if(miss) miss.style.display=(currentGame!==''&&gameMissing(currentGame))?'':'none';
+  renderModeNote();
 }
 function renderModeSelects(){
   renderInherit();
@@ -1919,6 +2006,11 @@ LRESULT RemapWindow::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // carrying over by hand.
         for (auto& entry : manual)
             m_games.push_back(std::move(entry));
+        // AppendOrphanProfiles says nothing after an enumeration that found
+        // nothing at all, which would leave a profile the page is showing
+        // with no entry behind it.
+        SeedProfileEntries();
+        m_enumerated = true;
 
         SendGameList();
         return 0;
@@ -1980,6 +2072,36 @@ static bool IdStillOnDisk(const std::wstring& id) {
     const DWORD attrs = GetFileAttributesW(path.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) return false;
     return isDir == ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+}
+
+void RemapWindow::SeedProfileEntries() {
+    for (const auto& [id, profile] : m_gameProfiles) {
+        const size_t token = TokenFor(id);
+        bool present = false;
+        for (const auto& entry : m_games)
+            if (entry.token == token) { present = true; break; }
+        if (present) continue;
+        InstalledGame game;
+        game.id     = id;
+        game.name   = profile.displayName.empty() ? id : profile.displayName;
+        // Not Missing: nothing has been looked for yet. The enumeration says
+        // which of these are really gone when it lands.
+        game.source = GameSource::Manual;
+        m_games.push_back({ std::move(game), token });
+    }
+}
+
+std::wstring RemapWindow::ScopeTitle() const {
+    switch (m_scope) {
+    case EditScope::Default: return L"Edit Default Profile";
+    case EditScope::Games:   return L"Edit Game Profiles";
+    case EditScope::Game:    break;
+    }
+    auto it = m_gameProfiles.find(m_scopeGameId);
+    const std::wstring name = it == m_gameProfiles.end() || it->second.displayName.empty()
+                                  ? std::wstring(L"Game")
+                                  : it->second.displayName;
+    return L"Edit Profile \u2014 " + name;
 }
 
 void RemapWindow::AppendOrphanProfiles() {
@@ -2177,19 +2299,42 @@ void RemapWindow::Open(HINSTANCE hInst, ControllerManager* mgr,
                        const ControllerProfile& cfg,
                        std::map<std::wstring, ControllerProfile> gameProfiles,
                        std::function<void(const std::wstring&, const ControllerProfile&)> applyCallback,
-                       std::function<void(const std::wstring&)> deleteCallback)
+                       std::function<void(const std::wstring&)> deleteCallback,
+                       EditScope scope, const std::wstring& gameId)
 {
-    // If already open, just bring it to front.
     if (m_hwnd) {
-        if (IsWindowVisible(m_hwnd)) { BringToFront(); return; }
+        if (IsWindowVisible(m_hwnd)) {
+            // Up already. The same view just comes to the front; a different
+            // one is switched to in place, and the page asks about any unsaved
+            // edits before it lets that happen. The installed list is kept —
+            // it was found moments ago.
+            if (scope != m_scope || (scope == EditScope::Game && gameId != m_scopeGameId)) {
+                m_scope         = scope;
+                m_scopeGameId   = gameId;
+                m_config        = cfg;
+                m_gameProfiles  = std::move(gameProfiles);
+                m_applyCallback = std::move(applyCallback);
+                m_deleteCallback = std::move(deleteCallback);
+                SeedProfileEntries();
+                SetWindowTextW(m_hwnd, ScopeTitle().c_str());
+                SendInitState();
+            }
+            BringToFront();
+            return;
+        }
         // Was hidden. Refresh config and show. The list is rebuilt from
         // scratch rather than kept, because the likeliest thing to have
         // happened since it was last up is that the user installed a game.
+        m_scope         = scope;
+        m_scopeGameId   = gameId;
         m_config        = cfg;
         m_games.clear();
+        m_enumerated    = false;
         m_gameProfiles  = std::move(gameProfiles);
         m_applyCallback = std::move(applyCallback);
         m_deleteCallback = std::move(deleteCallback);
+        SeedProfileEntries();
+        SetWindowTextW(m_hwnd, ScopeTitle().c_str());
         ShowWindow(m_hwnd, SW_SHOW);
         BringToFront();
         SendInitState();
@@ -2216,6 +2361,9 @@ void RemapWindow::Open(HINSTANCE hInst, ControllerManager* mgr,
     m_applyCallback = std::move(applyCallback);
     m_deleteCallback = std::move(deleteCallback);
     s_instance     = this;
+    m_scope        = scope;
+    m_scopeGameId  = gameId;
+    SeedProfileEntries();
 
     // --- Register window class (once) ---
     WNDCLASSEXW wc{};
@@ -2249,7 +2397,7 @@ void RemapWindow::Open(HINSTANCE hInst, ControllerManager* mgr,
     GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &mi);
 
     m_hwnd = CreateWindowExW(
-        0, CLASS_NAME, L"Customize Controls",
+        0, CLASS_NAME, ScopeTitle().c_str(),
         WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
         mi.rcWork.left, mi.rcWork.top, WINDOW_W, WINDOW_H,
         nullptr, nullptr, hInst, nullptr);
@@ -2639,8 +2787,14 @@ std::wstring RemapWindow::ProfileJson(const ControllerProfile& p) {
                L"\"" + k + L"haptic\":\"" + narrow(TriggerHapticId(t.haptic)) + L"\","
                L"\"" + k + L"full\":\"" + wid(t.full) + L"\"";
     };
+    // The mode travels to the page so it can say when a game's controls are
+    // not in use. It never comes back: the mode is the tray menu's to set.
+    const wchar_t* mode = p.behavior == ControllerBehavior::Lizard     ? L"lizard"
+                        : p.behavior == ControllerBehavior::SteamInput ? L"steam"
+                                                                       : L"steamless";
     return L"{\"useDefault\":\""
                + std::wstring(p.useDefaultMappings ? L"1" : L"0")
+               + L"\",\"mode\":\"" + mode
                + L"\","
                L"\"platform\":\""
                + std::wstring(p.platform == ControllerPlatform::PlayStation ? L"ps" : L"xbox")
@@ -2702,7 +2856,15 @@ void RemapWindow::SendInitState() {
     // receive it.
     std::wstring json =
         L"{\"type\":\"init\""
-        L",\"pending\":\"" + std::wstring(m_games.empty() ? L"1" : L"0") + L"\""
+        L",\"scope\":\"" + std::wstring(m_scope == EditScope::Default ? L"default"
+                                       : m_scope == EditScope::Games   ? L"games"
+                                                                       : L"game") + L"\""
+        L",\"game\":\"" + (m_scope == EditScope::Game
+                                ? std::to_wstring(TokenFor(m_scopeGameId)) : std::wstring())
+        + L"\""
+        // Whether the list is still being found. Seeded profile entries do
+        // not count — they are there to be named, not as the list.
+        L",\"pending\":\"" + std::wstring(m_enumerated ? L"0" : L"1") + L"\""
         L",\"labels\":{" + labels + L"}"
         L",\"games\":[" + GamesJson() + L"]"
         L",\"profiles\":{" + ProfilesJson() + L"}}";

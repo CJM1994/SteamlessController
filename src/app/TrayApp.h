@@ -7,6 +7,7 @@
 #include "ControllerPlatform.h"
 #include "DeviceRestart.h"
 #include "ForegroundWatcher.h"
+#include "ModeOverlay.h"
 #include "GameProfiles.h"
 #include "RemapWindow.h"
 #include "SteamAppLocator.h"
@@ -62,7 +63,9 @@ private:
     void ShowContextMenu();
     void LoadSettings();
     void SaveSettings();
-    void OpenRemapWindow();
+    // Edit the default profile, the game profiles, or one game's profile.
+    void OpenRemapWindow(RemapWindow::EditScope scope = RemapWindow::EditScope::Default,
+                         const std::wstring& gameId = {});
 
     // The tray app never runs elevated (an elevated foreground window blocks
     // unelevated SendInput — Steam Input's desktop cursor — via UIPI).
@@ -92,13 +95,10 @@ private:
     // doing depends on which profile is live, so the selection has to be on
     // record before EvaluateControl can read it.
     bool SelectProfile(const std::wstring& gameId);
-    // The selected profile's bindings — a game's if one is selected and has
-    // controls of its own, else the default's.
+    // What to apply: a game's profile if one is selected and has controls of
+    // its own, else the default's — bindings and pad type alike.
     const ControllerProfile& ActiveProfile() const;
-    // What to actually apply: ActiveProfile's bindings, wearing the pad type
-    // the resolved behaviour asks for.
-    ControllerProfile EffectiveProfile() const;
-    // Push the effective profile into ControllerManager. Safe while the
+    // Push the active profile into ControllerManager. Safe while the
     // controller is not ours, and called before acquiring rather than after so
     // the pad comes up already carrying the right bindings.
     void PushActiveProfile();
@@ -116,9 +116,9 @@ private:
     // it (for the log and the tooltip). Never Default. Meaningless while the
     // app is disabled, which EvaluateControl checks first.
     ControllerBehavior ResolveBehavior(const char** rule = nullptr) const;
-    // The behaviour a game's profile asks for, or Default when there is no
-    // such profile or it follows the default.
-    ControllerBehavior ProfileBehavior(const std::wstring& gameId) const;
+    // The profile for gameId, or null when there is none (including the
+    // empty id, which is the default).
+    const ControllerProfile* GameProfile(const std::wstring& gameId) const;
     // Act on ResolveBehavior — take or drop the Steam Input lease, bring the
     // virtual pad up or down — in the order that keeps the handoff clean. The
     // one place that turns intent into action, so every caller that can change
@@ -128,7 +128,11 @@ private:
     // settle, so one stray focus change does not cost a release and re-acquire
     // round trip. `immediate` skips it, for changes the user asked for
     // directly from the menu.
-    void EvaluateControl(bool immediate = false);
+    //
+    // `userAction` marks a change the user made from the menu. Changes they
+    // did not make themselves are announced once they have finished landing
+    // (see AnnounceIfSettled); ones they did are not.
+    void EvaluateControl(bool immediate = false, bool userAction = false);
     // Lease first, then pad: whether the lease has got as far as it is going
     // to for now, so an acquire will not find Steam still holding the device.
     bool LeaseSettled() const;
@@ -142,13 +146,41 @@ private:
     // Re-derive the tray icon and tooltip from everything that feeds them —
     // the controller, the lease, and the settings.
     void RefreshTrayIcon();
+
+    // What the controller is set up to be doing — the part of the resolved
+    // state a mode notification talks about. Compared whole: a switch between
+    // two Steamless profiles of different pad types is a change worth naming,
+    // one between two with the same pad is not.
+    struct ModeState {
+        bool               enabled  = false;
+        ControllerBehavior behavior = ControllerBehavior::Steamless;
+        ControllerPlatform platform = ControllerPlatform::Xbox;
+        bool operator==(const ModeState& o) const {
+            return enabled == o.enabled && behavior == o.behavior
+                && (behavior != ControllerBehavior::Steamless || platform == o.platform);
+        }
+        bool operator!=(const ModeState& o) const { return !(*this == o); }
+    };
+    // Whether everything `target` needs has actually happened: the pad up or
+    // down and of the right kind, the lease taken, or — for Steam Input —
+    // Steam seen reopening the controller.
+    bool ModeSettled(const ModeState& target) const;
+    // Raise the pending mode notification once its switch has settled.
+    // Called whenever any part of the state moves.
+    void AnnounceIfSettled();
+    void ShowModeNotification(const ModeState& state, const std::wstring& reason);
     void TryAcquireController(uint32_t stateWaitMs = 250);
     // Take a dock Steam still holds, once the controller is ours.
     void CycleUnheldDocks();
-    // skipCycle: Steam will be told to rediscover controllers some other way
-    // (the gate does it when the lease goes), or is blocked from them anyway,
-    // so the device cycle that hands the controller back is not needed.
-    void ReleaseControl(bool skipCycle = false);
+    // Whether letting go restarts the device so other programs see it arrive.
+    // Steam and SDL-based programs (emulators) only look for a controller on a
+    // device arrival, so one that was ours goes unnoticed without it.
+    enum class ReleaseArrival {
+        IfSteamRunning,  // for Steam to pick it up, when Steam is there to
+        Always,          // for anything that reads the controller directly
+        Never,           // the gate is about to make Steam look again itself
+    };
+    void ReleaseControl(ReleaseArrival arrival = ReleaseArrival::IfSteamRunning);
     void RecoverStrandedDevices();
     void WriteHeartbeat();
     // Carry out whatever the pending-disable record asks for: in process when
@@ -182,15 +214,29 @@ private:
 
     // Settings. Enabled off means hands off entirely: no pad, no lease.
     bool                               m_enabled         = true;
-    ControllerBehavior                 m_defaultBehavior = ControllerBehavior::Xbox;
+    ControllerBehavior                 m_defaultBehavior = ControllerBehavior::Steamless;
     bool                               m_useGameProfiles = true;
     SteamOverride                      m_steamOverride   = SteamOverride::Off;
 
     // Holds Steam off the controllers while the resolved behaviour wants it.
     SteamInputLease                    m_lease;
+    // The on-screen notice for mode switches; see ShowModeNotification.
+    ModeOverlay                        m_overlay;
     // The last resolution logged, so a line is written on a change rather
     // than on every foreground switch.
     std::string                        m_lastResolution;
+    // The mode last finished switching to, and the one being switched to now
+    // with why. The notification is raised for the pending one when it
+    // settles, unless the user asked for it themselves.
+    ModeState                          m_settledMode;
+    bool                               m_haveSettledMode = false;
+    ModeState                          m_pendingMode;
+    bool                               m_modePending     = false;
+    bool                               m_pendingSilent   = false;
+    std::wstring                       m_pendingReason;
+    // What the last resolution was attributed to, so the next one can say
+    // what changed ("Steam closed", "back to your default").
+    std::string                        m_lastRule;
 
     // Do we want the virtual pad right now? Acquiring is asynchronous — a
     // blocked claim escalates to a device cycle that lands seconds later as a
@@ -276,9 +322,6 @@ private:
     // m_gameProfiles, so it is also the answer to "did the active profile
     // actually change" without comparing whole profiles.
     std::wstring                       m_activeGameId;
-    // The game the "profile loaded" balloon last named, so alt-tabbing in and
-    // out of one game does not raise it over and over.
-    std::wstring                       m_toastedGameId;
     // What was last reported as applied, so the line is written on a change
     // rather than on every foreground switch.
     std::wstring                       m_lastAppliedDescription;
@@ -305,9 +348,11 @@ private:
     // One per ControllerBehavior value, offset by the value itself.
     static constexpr UINT IDM_DEFAULT_BASE     = 1100;
     // Game profile i, behaviour b: IDM_PROFILE_BASE + i * IDM_PROFILE_STRIDE + b,
-    // with i indexing m_menuProfileIds as it was when the menu was built.
+    // with i indexing m_menuProfileIds as it was when the menu was built. The
+    // last slot of each block, past every behaviour value, is "Edit Profile".
     static constexpr UINT IDM_PROFILE_BASE     = 2000;
     static constexpr UINT IDM_PROFILE_STRIDE   = 8;
+    static constexpr UINT IDM_PROFILE_EDIT     = 7;
     static constexpr UINT IDM_PROFILE_MAX      = 500;
     static constexpr UINT WM_TRAY           = WM_APP + 1;
     static constexpr UINT WM_STEAMSTATE     = WM_APP + 2;

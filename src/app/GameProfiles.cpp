@@ -111,14 +111,10 @@ std::map<std::wstring, ControllerProfile> Load() {
             p.useDefaultMappings = ReadDw(child, L"UseDefaultMappings", 0) != 0;
             p.platform = ReadDw(child, L"Platform", 0) != 0 ? ControllerPlatform::PlayStation
                                                             : ControllerPlatform::Xbox;
-            // Absent on profiles written before behaviours existed. Those
-            // either followed the default (and keep doing so) or drove a pad of
-            // their own platform, which is what they go on doing.
-            const ControllerBehavior legacy = p.useDefaultMappings
-                                                  ? ControllerBehavior::Default
-                                                  : BehaviorForPlatform(p.platform);
-            p.behavior = BehaviorFromDword(
-                ReadDw(child, L"Behavior", static_cast<DWORD>(legacy)), legacy);
+            // Absent on profiles written before behaviours existed, every one
+            // of which drove a pad for its game — which is Steamless.
+            p.behavior = BehaviorFromDword(ReadDw(child, L"Behavior",
+                static_cast<DWORD>(ControllerBehavior::Steamless)));
             p.back.l4 = BackButtonBinding::Unpack(ReadDw(child, L"L4", unbound));
             p.back.l5 = BackButtonBinding::Unpack(ReadDw(child, L"L5", unbound));
             p.back.r4 = BackButtonBinding::Unpack(ReadDw(child, L"R4", unbound));

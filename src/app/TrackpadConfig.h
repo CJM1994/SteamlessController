@@ -356,14 +356,10 @@ struct ControllerProfile {
     ControllerPlatform platform = ControllerPlatform::Xbox;
 
     // Per-game profiles only: what the controller does while this game is in
-    // front. Default follows the tray's default behaviour. The default profile
-    // never reads this — its behaviour is a tray setting, not part of the
-    // bindings it carries.
-    //
-    // For the pad behaviours, `platform` above is kept in step with this so
-    // the virtual pad and the bindings that depend on it (the DS4 touchpad)
-    // agree on what kind of pad it is.
-    ControllerBehavior behavior = ControllerBehavior::Default;
+    // front, chosen from the tray menu. The default profile never reads this —
+    // its behaviour is a tray setting, not part of the bindings it carries.
+    // In Steamless mode, `platform` above is the kind of pad driven.
+    ControllerBehavior behavior = ControllerBehavior::Steamless;
     BackButtonConfig back;
     TrackpadSettings leftPad{
         .mode      = TrackpadMode::ScrollWheel,

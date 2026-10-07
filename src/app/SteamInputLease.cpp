@@ -214,6 +214,7 @@ const char* SteamInputLease::Describe(State state) {
     case State::GateMissing: return "gate not loaded";
     case State::Failed:      return "failed";
     case State::Blocking:    return "blocking Steam Input";
+    case State::Releasing:   return "handing back to Steam";
     }
     return "unknown";
 }
@@ -274,8 +275,15 @@ void SteamInputLease::Worker() {
         if (wanted && !held.IsHeld()) {
             waitMs = TryAcquire(held);
         } else if (!wanted && held.IsHeld()) {
-            Release(held);
-            SetState(State::Off);
+            const DWORD pid = held.pid;
+            if (Release(held)) {
+                SetState(State::Releasing);
+                WaitForSteamReopen(pid);
+            }
+            // Wanted again while Steam was reopening: the next pass takes the
+            // lease straight back, so there is no Off in between to report.
+            if (!m_wanted.load()) SetState(State::Off);
+            continue;
         } else if (!wanted) {
             // Wanted and then un-wanted before a lease was ever taken —
             // whatever we were waiting on no longer matters.
@@ -350,7 +358,7 @@ DWORD SteamInputLease::TryAcquire(Held& held) {
     return INFINITE;
 }
 
-void SteamInputLease::Release(Held& held) {
+bool SteamInputLease::Release(Held& held) {
     SteamInputGate::Status status;
     const Error error = SteamInputGate::Exchange(held.pipe, SteamInputGate::Command::ReleaseLease,
                                                  status, EXCHANGE_TIMEOUT_MS);
@@ -363,18 +371,42 @@ void SteamInputLease::Release(Held& held) {
         EventLog::Write("LEASE: release handshake failed (%s); pipe closed, so the "
                         "block is lifted regardless", SteamInputGate::Describe(error));
         SteamInputGate::NudgeSteamRediscovery(pid);
-        return;
+        return false;
     }
     if (status.leaseCount > 0) {
         // Another client still blocks Steam; nothing for us to recover.
         EventLog::Write("LEASE: released; %u other lease(s) still block Steam",
                         status.leaseCount);
-        return;
+        return false;
     }
     if (status.InternalRecovery()) {
         EventLog::Write("LEASE: released; gate is running controller rediscovery");
     } else {
         EventLog::Write("LEASE: released; gate has no internal recovery, nudging Steam");
         SteamInputGate::NudgeSteamRediscovery(pid);
+    }
+    return true;
+}
+
+// The gate tracks every HID handle Steam opens once its hooks are in, and
+// closed them all when blocking began — so the count rising from zero is Steam
+// reopening devices, which is the rediscovery having landed.
+void SteamInputLease::WaitForSteamReopen(DWORD pid) {
+    const ULONGLONG start = GetTickCount64();
+    while (m_running.load() && !m_wanted.load()) {
+        SteamInputGate::Status status;
+        if (SteamInputGate::QueryStatus(pid, status) == Error::None
+                && status.leaseCount == 0 && status.hidHandleCount > 0) {
+            EventLog::Write("LEASE: Steam reopened %u HID handle(s) after %llu ms",
+                            status.hidHandleCount, GetTickCount64() - start);
+            return;
+        }
+        if (GetTickCount64() - start >= REOPEN_TIMEOUT_MS) {
+            EventLog::Write("LEASE: Steam had not reopened any HID device after %lu ms; "
+                            "carrying on", REOPEN_TIMEOUT_MS);
+            return;
+        }
+        // Woken early by SetWanted or Stop, which the loop condition then sees.
+        WaitForSingleObject(m_wake, REOPEN_POLL_MS);
     }
 }

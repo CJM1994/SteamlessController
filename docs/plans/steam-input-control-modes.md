@@ -7,6 +7,39 @@ the gate from
 [steam-input-lease](https://github.com/KillerPixelCrew/steam-input-lease)
 (MIT, reviewed in `reference/steam-input-lease/`, which git ignores).
 
+## Status (supersedes parts of §0 and §3 below)
+
+Implemented on `feature/steam-input-modes`. Where the build and the sections
+below differ, the build wins:
+
+- **Three modes**, not four behaviours: Steamless Mode, Steam Input Mode and
+  Lizard Mode. Xbox vs PlayStation is each profile's "Appear to games as", set
+  in its editor; game profiles have no "follow the default" mode.
+- **Tray menu:** Enabled; Default Behaviour (the three modes, plus "Use Steam
+  Input Mode while Steam is running"); Game Profiles (Use Game Profiles, each
+  game's mode plus "Edit Profile...", "Edit Game Profiles..."); "Edit Default
+  Profile...".
+- **Editor scopes:** the default profile alone, game profiles only (no
+  default), or a single game.
+- **"In front"** means what is physically visible: the focused window, unless
+  another app's window that covers 90% or more of that monitor shows at its
+  centre. Re-checked every 750 ms, because a change in stacking order raises no
+  foreground event.
+- **Mode notices** are drawn by `ModeOverlay` (an always-on-top, click-through
+  layered window), not Windows notifications, which Do Not Disturb suppresses
+  while games run. Raised only once a switch has fully landed, Steam's reopen
+  included.
+- **Handing over to programs that read the controller directly** (emulators
+  via SDL):
+  - Switching to Lizard after an exclusive hold restarts the device, so they
+    see an arrival.
+  - While the gate blocks Steam, a device another program already holds is
+    shared rather than cycled, and released without a restart. A restart would
+    be vetoed by that program's handle and end with PnP yanking the device out
+    from under it.
+  - Input leaks into the sharer only if it reads input while unfocused; this
+    is logged as `SHARING:`.
+
 ## 0. Behaviour spec
 
 ### Behaviours

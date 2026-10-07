@@ -70,6 +70,7 @@ add_executable(ForegroundProbe
     src/app/ProcessIdentity.cpp
 )
 target_include_directories(ForegroundProbe PRIVATE src)
+target_link_libraries(ForegroundProbe PRIVATE dwmapi)
 if (MSVC)
     target_compile_options(ForegroundProbe PRIVATE /W4 /WX /utf-8)
     set_target_properties(ForegroundProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
@@ -255,6 +256,7 @@ add_executable(SteamlessController WIN32
     src/app/InputInjection.cpp
     src/app/SteamWatcher.cpp
     src/app/SteamInputLease.cpp
+    src/app/ModeOverlay.cpp
     src/app/DeviceRestart.cpp
     src/app/EventLog.cpp
     src/app/ForegroundWatcher.cpp
@@ -282,6 +284,7 @@ target_link_libraries(SteamlessController PRIVATE
     shlwapi
     cfgmgr32
     windowsapp
+    gdiplus
 )
 if (MSVC)
     target_compile_options(SteamlessController PRIVATE /W4 /WX /utf-8 /wd4828)

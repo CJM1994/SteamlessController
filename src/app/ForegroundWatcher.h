@@ -4,7 +4,8 @@
 #include <string>
 #include "ProcessIdentity.h"
 
-// Reports which application the user has switched to, without polling.
+// Reports which application the user has switched to — event-driven, with a
+// slow look at the stacking order as a backstop (see FrontWindow and OnPoll).
 //
 // Built on SetWinEventHook(EVENT_SYSTEM_FOREGROUND), which is the only
 // push-based answer to "what is the user doing now" available to a process
@@ -32,10 +33,19 @@ public:
     bool Start(ChangedFn onChange);
     void Stop();
 
-    // Resolve the foreground window right now, for callers that need to
+    // Resolve the application in front right now, for callers that need to
     // catch up rather than wait for the next switch (taking the controller
     // back, say, when the user has been sitting in a game the whole time).
     static ForegroundIdentity Current();
+
+    // The window that is in front as the user sees it. Usually the one with
+    // focus — but a launcher can keep focus on a splash or startup window
+    // while the game it launched covers the screen, and a game can take focus
+    // while a launcher's always-on-top intro still covers it. Either way what
+    // is on screen is the honest answer, so a different application's window
+    // that fills the focused window's monitor, and is what shows at its
+    // centre, wins over focus.
+    static HWND FrontWindow();
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
@@ -43,11 +53,15 @@ private:
                                   LONG idObject, LONG idChild,
                                   DWORD thread, DWORD time);
     void OnDebounceElapsed();
+    // Windows changing places raises no foreground event, so the stacking is
+    // also looked at on a slow timer; a change goes through the same debounce.
+    void OnPoll();
 
     HWINEVENTHOOK m_hook   = nullptr;
     HWND          m_hwnd   = nullptr;  // message-only, owns the debounce timer
     ChangedFn     m_onChange;
     ForegroundIdentity m_last;
+    HWND          m_lastFront = nullptr;  // what the poll last saw
 
     static ForegroundWatcher* s_instance;
 
@@ -59,4 +73,12 @@ private:
     // read as several different applications, which matters because a
     // profile switch can rebuild the virtual controller.
     static constexpr UINT DEBOUNCE_MS = 400;
+    static constexpr UINT_PTR IDT_POLL = 2;
+    // Cheap — one hit test and a rectangle — and only acted on when the
+    // answer moves, so this is about how late a covered focus is noticed.
+    static constexpr UINT POLL_MS = 750;
+    // How much of the monitor a window must cover to count as being in front
+    // of the focused one. High enough that a dialog or a corner overlay never
+    // does; low enough to forgive a borderless game a few pixels short.
+    static constexpr int COVER_PERCENT = 90;
 };
