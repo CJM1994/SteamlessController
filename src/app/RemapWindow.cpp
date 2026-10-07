@@ -1,4 +1,5 @@
 #include "RemapWindow.h"
+#include "AppPaths.h"
 #include "KeyInput.h"
 #include "ControllerManager.h"
 #include "EventLog.h"
@@ -2431,10 +2432,8 @@ void RemapWindow::BringToFront() const {
 // ---------------------------------------------------------------------------
 
 void RemapWindow::CreateWebViewAsync(HWND hwnd) {
-    // Use %LOCALAPPDATA%\SteamlessController\WebView2 for the browser data dir.
-    wchar_t localApp[MAX_PATH] = {};
-    SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localApp);
-    std::wstring dataDir = std::wstring(localApp) + L"\\SteamlessController\\WebView2";
+    // The browser's own data lives with the rest of ours — portable when we are.
+    std::wstring dataDir = AppPaths::DataFile(L"WebView2");
 
     using namespace Microsoft::WRL;
 

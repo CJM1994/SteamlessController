@@ -111,9 +111,23 @@ otherwise keep claiming the controller. See
 [`src/app/GameLibrary.h`](src/app/GameLibrary.h) for the four shapes a game's
 saved identity can take.
 
+## Portable
+
+Settings, game profiles and logs live in a `Data` folder beside the executable,
+so a copy of the output folder is a complete install that can be moved or
+carried. Only when that folder cannot be created (an install under Program
+Files) does the app fall back to `%LOCALAPPDATA%\SteamlessController`. The
+first run of this build copies settings an earlier build kept in the registry,
+and leaves the registry as it was.
+
+The one thing outside the app's folder is the Steam Input blocker, which has to
+live in Steam's folder for Steam to load it. Install and remove it from the tray
+menu under **Steam Input Blocker**.
+
 ## Third-party
 
 - [ViGEmClient](https://github.com/nefarius/ViGEmClient) — MIT License, built from source as a static library
+- [steam-input-lease](https://github.com/KillerPixelCrew/steam-input-lease) — MIT License. The prebuilt v0.1.0 gate DLL is downloaded and hash-checked at configure time and shipped as `steam_input_gate.dll`; its licence and third-party notices ship beside it
 
 ## Code signing policy
 

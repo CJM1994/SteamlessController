@@ -81,6 +81,11 @@ Source: "{#BuildDir}SteamlessDeviceCycle.exe"; DestDir: "{app}"; Flags: ignoreve
 ; Setup's driver check, and the thing to ask a user to run when a controller
 ; never reaches a game. Installed rather than temporary for the second reason.
 Source: "{#BuildDir}ViGEmBusProbe.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The Steam Input blocker the app offers to put into Steam's folder, and its
+; licence. Copied by the build beside the executable; see CMakeLists.txt.
+Source: "{#BuildDir}steam_input_gate.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}steam_input_gate.LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}steam_input_gate.THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "resources\{#ViGEmSetup}"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]

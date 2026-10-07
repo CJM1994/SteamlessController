@@ -11,6 +11,7 @@
 #include "GameProfiles.h"
 #include "RemapWindow.h"
 #include "SteamAppLocator.h"
+#include "SteamGate.h"
 #include "SteamInputLease.h"
 #include "SteamWatcher.h"
 
@@ -169,6 +170,19 @@ private:
     // Called whenever any part of the state moves.
     void AnnounceIfSettled();
     void ShowModeNotification(const ModeState& state, const std::wstring& reason);
+
+    // The Steam Input blocker (the gate) in Steam's folder. Status is read
+    // fresh each time the menu opens; installing and removing run the helper
+    // elevated, one UAC prompt per action, and report back through
+    // WM_GATEDONE.
+    std::wstring GateStatusText(const SteamGate::Inspection& gate, bool loaded) const;
+    // Whether the running Steam has the gate loaded — answered at once.
+    bool GateLoaded() const;
+    void RunGateCommand(bool install);
+    void OnGateCommandDone(DWORD exitCode);
+    // Exit Steam and start it again, so it loads (or drops) the gate. Off the
+    // UI thread: waiting for Steam to exit takes seconds.
+    void RestartSteam();
     void TryAcquireController(uint32_t stateWaitMs = 250);
     // Take a dock Steam still holds, once the controller is ours.
     void CycleUnheldDocks();
@@ -290,6 +304,8 @@ private:
     // The game profile each per-game menu item refers to, captured when the
     // menu was built so a command cannot land on a different profile.
     std::vector<std::wstring>          m_menuProfileIds;
+    // An install or uninstall is running; the menu offers neither meanwhile.
+    bool                               m_gateBusy = false;
     std::mutex                         m_alertMutex;   // guards the two alert strings
     std::wstring                       m_alertTitle;   // set on read threads,
     std::wstring                       m_alertText;    // consumed on WM_ALERT
@@ -345,6 +361,9 @@ private:
     static constexpr UINT IDM_USE_PROFILES     = 1019;
     static constexpr UINT IDM_STEAM_OVERRIDE   = 1020;
     static constexpr UINT IDM_EDIT_PROFILES    = 1021;
+    static constexpr UINT IDM_GATE_INSTALL     = 1022;
+    static constexpr UINT IDM_GATE_UNINSTALL   = 1023;
+    static constexpr UINT IDM_STEAM_RESTART    = 1024;
     // One per ControllerBehavior value, offset by the value itself.
     static constexpr UINT IDM_DEFAULT_BASE     = 1100;
     // Game profile i, behaviour b: IDM_PROFILE_BASE + i * IDM_PROFILE_STRIDE + b,
@@ -363,6 +382,10 @@ private:
     static constexpr UINT WM_CONTROLSTATE   = WM_APP + 4;
     // The lease worker changed state; posted from its thread.
     static constexpr UINT WM_LEASESTATE     = WM_APP + 5;
+    // The elevated gate install/uninstall finished; WPARAM is its exit code.
+    static constexpr UINT WM_GATEDONE       = WM_APP + 6;
+    // A Steam restart we asked for finished; WPARAM is nonzero on success.
+    static constexpr UINT WM_STEAMRESTARTED = WM_APP + 7;
     static constexpr UINT TRAY_UID          = 1;
     static constexpr UINT_PTR IDT_ACQUIRE         = 1;
     static constexpr UINT_PTR IDT_ACQUIRE_VERDICT = 2;

@@ -1,3 +1,4 @@
+#include "AppPaths.h"
 #include "TrayApp.h"
 #include <Windows.h>
 #include <clocale>
@@ -17,6 +18,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int) {
     // behaviour, and here at the top so it lands before the first log line and
     // before any thread exists to race it.
     setlocale(LC_CTYPE, ".UTF8");
+
+    // Settle where settings and logs live before anything writes either. Only
+    // this process may create the portable folder; see AppPaths.
+    AppPaths::InitDataDir(/*mayCreatePortable=*/true);
 
     // Enable per-monitor v2 DPI awareness so the WebView2 window renders crisp
     // on high-DPI displays and the WM_NCHITTEST pixel math stays correct.

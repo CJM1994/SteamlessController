@@ -76,8 +76,9 @@ HANDLE Connect(DWORD steamPid, DWORD timeoutMs, Error& error);
 // One request and its response on a pipe from Connect.
 Error Exchange(HANDLE pipe, Command command, Status& status, DWORD timeoutMs);
 
-// Connect + QueryStatus + close. Never changes the lease count.
-Error QueryStatus(DWORD steamPid, Status& status);
+// Connect + QueryStatus + close. Never changes the lease count. A connect
+// timeout of 0 makes one attempt — "is the gate loaded", answered at once.
+Error QueryStatus(DWORD steamPid, Status& status, DWORD connectTimeoutMs = 500);
 
 // The fallback when a release lifted blocking but the gate could not run its
 // own recovery: post the same harmless device-change notice upstream's host

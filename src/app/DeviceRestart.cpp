@@ -1,3 +1,4 @@
+#include "AppPaths.h"
 #include "DeviceRestart.h"
 #include <SetupAPI.h>
 #include <cfgmgr32.h>
@@ -340,11 +341,7 @@ bool RestartInterfaceDevice(const std::wstring& interfacePath, DWORD* errorOut) 
 // ---------------------------------------------------------------------------
 
 static std::wstring StatusPath() {
-    wchar_t local[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return L"";
-    const std::wstring dir = std::wstring(local) + L"\\SteamlessController";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\cycle.status";
+    return AppPaths::DataFile(L"cycle.status");
 }
 
 bool WriteCycleStatus(const CycleResult& result) {
@@ -412,11 +409,7 @@ bool ReadCycleStatus(CycleResult& result) {
 // ---------------------------------------------------------------------------
 
 static std::wstring PendingPath() {
-    wchar_t local[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return L"";
-    const std::wstring dir = std::wstring(local) + L"\\SteamlessController";
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\pending-disable";
+    return AppPaths::DataFile(L"pending-disable");
 }
 
 bool ArmPendingDisable(const std::wstring& instanceId,

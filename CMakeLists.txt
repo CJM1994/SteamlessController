@@ -3,6 +3,27 @@ project(SteamlessController CXX)
 
 include(FetchContent)
 
+# Steam Input gate, from steam-input-lease (MIT) — the proxy DLL the tray app
+# installs into Steam's folder to block Steam Input. Prebuilt upstream release,
+# pinned by hash; shipped beside the app as steam_input_gate.dll. See
+# src/app/SteamGate.h.
+set(SIL_VERSION 0.1.0)
+set(SIL_ZIP_SHA256 25979e1333dce6a49cfaa9b57cbd63e2e8a5b1188ba565771fa458d43315fb2c)
+set(SIL_DLL_SHA256 11d9c4acc9771e39a986dc5e627b0285d5830a85f730af39abea2e7b903507cd)
+set(SIL_ZIP ${CMAKE_BINARY_DIR}/steam-input-lease-${SIL_VERSION}-win-x64.zip)
+set(SIL_DIR ${CMAKE_BINARY_DIR}/steam-input-lease-${SIL_VERSION})
+file(DOWNLOAD
+    https://github.com/KillerPixelCrew/steam-input-lease/releases/download/v${SIL_VERSION}/steam-input-lease-${SIL_VERSION}-win-x64.zip
+    ${SIL_ZIP}
+    EXPECTED_HASH SHA256=${SIL_ZIP_SHA256}
+    TLS_VERIFY ON)
+file(ARCHIVE_EXTRACT INPUT ${SIL_ZIP} DESTINATION ${SIL_DIR}
+     PATTERNS XInput1_4.dll LICENSE-MIT THIRD_PARTY_LICENSES.md)
+file(SHA256 ${SIL_DIR}/XInput1_4.dll SIL_DLL_ACTUAL)
+if(NOT SIL_DLL_ACTUAL STREQUAL SIL_DLL_SHA256)
+    message(FATAL_ERROR "steam-input-lease gate hash mismatch: ${SIL_DLL_ACTUAL}")
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -68,6 +89,7 @@ add_executable(ForegroundProbe
     src/probe/ForegroundProbe.cpp
     src/app/ForegroundWatcher.cpp
     src/app/ProcessIdentity.cpp
+    src/app/AppPaths.cpp
 )
 target_include_directories(ForegroundProbe PRIVATE src)
 target_link_libraries(ForegroundProbe PRIVATE dwmapi)
@@ -130,6 +152,7 @@ add_executable(SteamInputLeaseProbe
     src/probe/SteamInputLeaseProbe.cpp
     src/app/SteamInputLease.cpp
     src/app/EventLog.cpp
+    src/app/AppPaths.cpp
 )
 target_include_directories(SteamInputLeaseProbe PRIVATE src)
 if (MSVC)
@@ -143,8 +166,10 @@ add_executable(SteamlessDeviceCycle WIN32
     src/helper/DeviceCycleHelper.cpp
     src/app/DeviceRestart.cpp
     src/app/HandleFinder.cpp
+    src/app/AppPaths.cpp
+    src/app/SteamGate.cpp
 )
-target_link_libraries(SteamlessDeviceCycle PRIVATE SteamController cfgmgr32)
+target_link_libraries(SteamlessDeviceCycle PRIVATE SteamController cfgmgr32 shell32)
 if (MSVC)
     target_compile_options(SteamlessDeviceCycle PRIVATE /W4 /WX /utf-8)
 endif()
@@ -156,6 +181,7 @@ add_executable(TrackpadDirectionProbe
     src/app/TrackpadInput.cpp
     src/app/InputInjection.cpp
     src/app/EventLog.cpp
+    src/app/AppPaths.cpp
 )
 target_include_directories(TrackpadDirectionProbe PRIVATE src)
 target_link_libraries(TrackpadDirectionProbe PRIVATE SteamController)
@@ -269,6 +295,9 @@ add_executable(SteamlessController WIN32
     src/app/SteamAppLocator.cpp
     src/app/ViGEmBusInfo.cpp
     resources/app.rc
+    src/app/AppPaths.cpp
+    src/app/SettingsStore.cpp
+    src/app/SteamGate.cpp
 )
 target_include_directories(SteamlessController PRIVATE
     resources
@@ -289,3 +318,15 @@ target_link_libraries(SteamlessController PRIVATE
 if (MSVC)
     target_compile_options(SteamlessController PRIVATE /W4 /WX /utf-8 /wd4828)
 endif()
+
+# The gate and its licence travel beside the executable, so a copy of the
+# output folder is a complete, portable install.
+add_custom_command(TARGET SteamlessController POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SIL_DIR}/XInput1_4.dll $<TARGET_FILE_DIR:SteamlessController>/steam_input_gate.dll
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SIL_DIR}/LICENSE-MIT $<TARGET_FILE_DIR:SteamlessController>/steam_input_gate.LICENSE.txt
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${SIL_DIR}/THIRD_PARTY_LICENSES.md
+            $<TARGET_FILE_DIR:SteamlessController>/steam_input_gate.THIRD_PARTY_LICENSES.md
+    VERBATIM)

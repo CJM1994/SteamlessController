@@ -27,6 +27,9 @@
 #include "app/DeviceRestart.h"
 #include "app/HandleFinder.h"
 #include "steam/SteamController.h"
+#include "app/AppPaths.h"
+#include "app/SteamGate.h"
+#include <shellapi.h>
 
 // Defined below; used by the cycle path that appears before it.
 static std::vector<std::wstring> TakeRequestedPaths();
@@ -35,13 +38,8 @@ static std::vector<std::wstring> TakeRequestedPaths();
 // otherwise completely silent. It cannot share the tray app's events.log —
 // that is held open with _SH_DENYWR — so it keeps its own next to it.
 static void CycleLog(const char* fmt, ...) {
-    wchar_t local[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return;
-    const std::wstring dir  = std::wstring(local) + L"\\SteamlessController";
-    CreateDirectoryW(dir.c_str(), nullptr);
-
     FILE* f = nullptr;
-    if (_wfopen_s(&f, (dir + L"\\cycle.log").c_str(), L"a") != 0 || !f) return;
+    if (_wfopen_s(&f, AppPaths::DataFile(L"cycle.log").c_str(), L"a") != 0 || !f) return;
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -330,10 +328,7 @@ static int UnregisterTask() {
 // bit (#79). The request is consumed on read: a stale one must never narrow a
 // later cycle that had no opinion.
 static std::vector<std::wstring> TakeRequestedPaths() {
-    wchar_t local[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return {};
-    const std::wstring file =
-        std::wstring(local) + L"\\SteamlessController\\cycle.request";
+    const std::wstring file = AppPaths::DataFile(L"cycle.request");
 
     std::vector<std::wstring> paths;
     FILE* f = nullptr;
@@ -366,6 +361,31 @@ static int FindHoldersOnly() {
     return 0;
 }
 
+// --deploy-gate / --park-gate "<Steam folder>". Run elevated by the tray app
+// through a UAC prompt — not through the scheduled task, which cannot pass the
+// folder. The outcome goes to gate.result in the data folder for the app to
+// read back: the exit code on the first line, the message for the user on the
+// second.
+static int GateCommand(bool deploy) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    const std::wstring steamDir = argv && argc >= 3 ? argv[2] : L"";
+    if (argv) LocalFree(argv);
+
+    std::wstring message;
+    const int code = deploy ? SteamGate::Deploy(steamDir, message)
+                            : SteamGate::Park(steamDir, message);
+    CycleLog("GATE: %s in %ls -> %d: %ls", deploy ? "deploy" : "park",
+             steamDir.c_str(), code, message.c_str());
+
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, AppPaths::DataFile(L"gate.result").c_str(), L"w, ccs=UTF-8") == 0 && f) {
+        fwprintf(f, L"%d\n%ls\n", code, message.c_str());
+        fclose(f);
+    }
+    return code;
+}
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmdLine, int) {
     // cycle.log has the same %ls problem the event log does, and more to lose
     // by it: the holder lists and veto names it exists to record are exactly
@@ -376,5 +396,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmdLine, int) {
     if (cmdLine && wcsstr(cmdLine, L"--unregister"))   return UnregisterTask();
     if (cmdLine && wcsstr(cmdLine, L"--find-holders")) return FindHoldersOnly();
     if (cmdLine && wcsstr(cmdLine, L"--reconcile"))    return ReconcilePending();
+    if (cmdLine && wcsstr(cmdLine, L"--deploy-gate"))  return GateCommand(true);
+    if (cmdLine && wcsstr(cmdLine, L"--park-gate"))    return GateCommand(false);
     return CycleDevices();
 }

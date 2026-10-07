@@ -182,9 +182,9 @@ Error Exchange(HANDLE pipe, Command command, Status& status, DWORD timeoutMs) {
     return response.result == 0 ? Error::None : Error::Rejected;
 }
 
-Error QueryStatus(DWORD steamPid, Status& status) {
+Error QueryStatus(DWORD steamPid, Status& status, DWORD connectTimeoutMs) {
     Error error = Error::None;
-    HANDLE pipe = Connect(steamPid, 500, error);
+    HANDLE pipe = Connect(steamPid, connectTimeoutMs, error);
     if (pipe == INVALID_HANDLE_VALUE) return error;
     error = Exchange(pipe, Command::QueryStatus, status, 2000);
     CloseHandle(pipe);

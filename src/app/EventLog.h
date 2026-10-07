@@ -4,7 +4,7 @@
 
 // Persistent diagnostic event log for support and field debugging: device
 // connect/disconnect causes, mode transitions, battery readings, stalls.
-// Written to %LOCALAPPDATA%\SteamlessController\events.log and rotated to
+// Written to events.log in the data folder (see AppPaths) and rotated to
 // events.old.log at ~512 KB, so it can run forever without growing unbounded.
 //
 // Thread-safe. printf-style formatting; use %ls for wide strings (paths).

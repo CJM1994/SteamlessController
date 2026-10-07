@@ -10,6 +10,7 @@
 // They normally agree. A launcher that keeps focus on a splash screen while a
 // game draws over it is the case where they do not, and this is what tells
 // which of them is lying, and how.
+#include "app/AppPaths.h"
 #include "app/ForegroundWatcher.h"
 #include <Windows.h>
 #include <dwmapi.h>
@@ -136,10 +137,8 @@ static std::string Snapshot() {
 }
 
 static int ZOrder(int seconds) {
-    wchar_t local[MAX_PATH];
-    std::wstring logPath;
-    if (GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH))
-        logPath = std::wstring(local) + L"\\SteamlessController\\zorder.log";
+    // Beside the app's own logs, so it is in the same place to find.
+    const std::wstring logPath = AppPaths::DataFile(L"zorder.log");
     FILE* log = nullptr;
     if (!logPath.empty()) _wfopen_s(&log, logPath.c_str(), L"w");
 

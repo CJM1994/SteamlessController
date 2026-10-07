@@ -1,4 +1,5 @@
 #include "EventLog.h"
+#include "AppPaths.h"
 #include <Windows.h>
 #include <cstdarg>
 #include <cstdio>
@@ -12,14 +13,7 @@ constexpr long kMaxLogBytes = 512 * 1024;
 std::mutex g_mutex;
 FILE*      g_file = nullptr;
 
-std::wstring LogDir() {
-    wchar_t buf[MAX_PATH];
-    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return L"";
-    std::wstring dir(buf);
-    dir += L"\\SteamlessController";
-    return dir;
-}
+std::wstring LogDir() { return AppPaths::DataDir(); }
 
 std::wstring LogPath()    { return LogDir() + L"\\events.log"; }
 std::wstring OldLogPath() { return LogDir() + L"\\events.old.log"; }

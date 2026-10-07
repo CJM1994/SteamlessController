@@ -1,37 +1,29 @@
 #include "GameProfiles.h"
+#include "SettingsStore.h"
 #include <Windows.h>
 #include <cstdio>
 
 namespace {
 
-constexpr wchar_t kProfilesKey[] = L"Software\\SteamlessController\\GameProfiles";
+// Each profile is a numbered section ("GameProfile 0", "GameProfile 1", ...)
+// rather than one named after the game, whose id — an exe path, a URI — would
+// make an unwieldy and fragile section name.
+constexpr wchar_t kSectionPrefix[] = L"GameProfile ";
 
-DWORD ReadDw(HKEY key, const wchar_t* name, DWORD def) {
-    DWORD val = 0, size = sizeof(val);
-    if (RegQueryValueExW(key, name, nullptr, nullptr,
-                         reinterpret_cast<LPBYTE>(&val), &size) == ERROR_SUCCESS)
-        return val;
-    return def;
+DWORD ReadDw(const std::wstring& section, const wchar_t* name, DWORD def) {
+    return SettingsStore::Instance().GetDw(section, name, def);
 }
 
-std::wstring ReadSz(HKEY key, const wchar_t* name) {
-    wchar_t buf[MAX_PATH] = {};
-    DWORD size = sizeof(buf);
-    if (RegQueryValueExW(key, name, nullptr, nullptr,
-                         reinterpret_cast<LPBYTE>(buf), &size) == ERROR_SUCCESS)
-        return buf;
-    return {};
+std::wstring ReadSz(const std::wstring& section, const wchar_t* name) {
+    return SettingsStore::Instance().GetSz(section, name);
 }
 
-void WriteDw(HKEY key, const wchar_t* name, DWORD val) {
-    RegSetValueExW(key, name, 0, REG_DWORD,
-                   reinterpret_cast<const BYTE*>(&val), sizeof(val));
+void WriteDw(const std::wstring& section, const wchar_t* name, DWORD val) {
+    SettingsStore::Instance().SetDw(section, name, val);
 }
 
-void WriteSz(HKEY key, const wchar_t* name, const std::wstring& val) {
-    RegSetValueExW(key, name, 0, REG_SZ,
-                   reinterpret_cast<const BYTE*>(val.c_str()),
-                   static_cast<DWORD>((val.size() + 1) * sizeof(wchar_t)));
+void WriteSz(const std::wstring& section, const wchar_t* name, const std::wstring& val) {
+    SettingsStore::Instance().SetSz(section, name, val);
 }
 
 DWORD Packed(BackButtonAction a) {
@@ -42,7 +34,7 @@ DWORD Packed(BackButtonAction a) {
 // carry the same twelve settings and only the prefix differs, and a
 // copy-pasted second copy is where a left-pad name ends up reading a
 // right-pad value.
-void ReadPad(HKEY key, const wchar_t* prefix, TrackpadSettings& pad) {
+void ReadPad(const std::wstring& key, const wchar_t* prefix, TrackpadSettings& pad) {
     auto name = [&](const wchar_t* suffix) { return std::wstring(prefix) + suffix; };
     auto binding = [&](const wchar_t* suffix, BackButtonAction def) {
         return BackButtonBinding::Unpack(ReadDw(key, name(suffix).c_str(), Packed(def)));
@@ -64,7 +56,7 @@ void ReadPad(HKEY key, const wchar_t* prefix, TrackpadSettings& pad) {
     pad.diagonals = DiagonalModeFromDword(ReadDw(key, name(L"Diagonals").c_str(), 0));
 }
 
-void WritePad(HKEY key, const wchar_t* prefix, const TrackpadSettings& pad) {
+void WritePad(const std::wstring& key, const wchar_t* prefix, const TrackpadSettings& pad) {
     auto name = [&](const wchar_t* suffix) { return std::wstring(prefix) + suffix; };
 
     WriteDw(key, name(L"Mode").c_str(),      static_cast<DWORD>(pad.mode));
@@ -85,22 +77,11 @@ namespace GameProfiles {
 
 std::map<std::wstring, ControllerProfile> Load() {
     std::map<std::wstring, ControllerProfile> profiles;
-
-    HKEY parent;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, kProfilesKey, 0, KEY_READ, &parent) != ERROR_SUCCESS)
-        return profiles;
-
     const DWORD unbound = BackButtonBinding::FromAction(BackButtonAction::None).Pack();
 
-    // Numbered subkeys ("0", "1", ...) rather than the game id itself — an
-    // exe-path id is not a legal single registry key name, since its
-    // backslashes would be read as key-hierarchy separators.
     for (DWORD i = 0;; ++i) {
-        wchar_t sub[16];
-        swprintf_s(sub, L"%lu", i);
-        HKEY child;
-        if (RegOpenKeyExW(parent, sub, 0, KEY_READ, &child) != ERROR_SUCCESS)
-            break;
+        const std::wstring child = kSectionPrefix + std::to_wstring(i);
+        if (!SettingsStore::Instance().HasSection(child)) break;
 
         const std::wstring id = ReadSz(child, L"Id");
         if (!id.empty()) {
@@ -133,27 +114,19 @@ std::map<std::wstring, ControllerProfile> Load() {
             p.rightTrigger = ReadTriggerSettings(L"RightTrigger", readDw);
             profiles[id] = p;
         }
-        RegCloseKey(child);
     }
-
-    RegCloseKey(parent);
     return profiles;
 }
 
 void Save(const std::map<std::wstring, ControllerProfile>& profiles) {
-    HKEY parent;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, kProfilesKey, 0, nullptr,
-                        REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr,
-                        &parent, nullptr) != ERROR_SUCCESS)
-        return;
+    SettingsStore& store = SettingsStore::Instance();
+    // Rewritten whole, so a deleted profile leaves no section behind.
+    store.RemoveSections(kSectionPrefix);
 
     DWORD i = 0;
     for (const auto& [id, p] : profiles) {
-        wchar_t sub[16];
-        swprintf_s(sub, L"%lu", i);
-        HKEY child;
-        if (RegCreateKeyExW(parent, sub, 0, nullptr, REG_OPTION_NON_VOLATILE,
-                            KEY_WRITE, nullptr, &child, nullptr) == ERROR_SUCCESS) {
+        const std::wstring child = kSectionPrefix + std::to_wstring(i);
+        {
             WriteSz(child, L"Id", id);
             WriteSz(child, L"Name", p.displayName);
             // The controls below are written either way, so a profile that
@@ -171,21 +144,10 @@ void Save(const std::map<std::wstring, ControllerProfile>& profiles) {
             auto writeDw = [&](const wchar_t* name, uint32_t v) { WriteDw(child, name, v); };
             WriteTriggerSettings(L"LeftTrigger",  p.leftTrigger,  writeDw);
             WriteTriggerSettings(L"RightTrigger", p.rightTrigger, writeDw);
-            RegCloseKey(child);
         }
         ++i;
     }
-
-    // Numbered subkeys have no children of their own, so dropping whatever
-    // range existed past the current count is a plain per-key delete — no
-    // recursive-delete dependency needed when the map has shrunk.
-    for (;; ++i) {
-        wchar_t sub[16];
-        swprintf_s(sub, L"%lu", i);
-        if (RegDeleteKeyW(parent, sub) != ERROR_SUCCESS) break;
-    }
-
-    RegCloseKey(parent);
+    store.Save();
 }
 
 }  // namespace GameProfiles

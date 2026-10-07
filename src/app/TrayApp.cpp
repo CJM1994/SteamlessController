@@ -6,6 +6,8 @@
 #include "GameLibrary.h"
 #include "GameProfiles.h"
 #include "InputInjection.h"
+#include "AppPaths.h"
+#include "SettingsStore.h"
 #include "steam/SteamController.h"
 #include "resource.h"
 #include <shellapi.h>
@@ -16,6 +18,7 @@
 #include <cstring>
 #include <cwctype>
 #include <string>
+#include <thread>
 
 static TrayApp* g_app = nullptr;
 
@@ -62,10 +65,7 @@ static bool RunToolHidden(std::wstring cmdline) {
 // One path per line, cycled in that order — the helper has always read the
 // request that way.
 static void RequestNarrowCycle(const std::vector<std::wstring>& paths) {
-    wchar_t local[MAX_PATH];
-    if (!GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH)) return;
-    const std::wstring file =
-        std::wstring(local) + L"\\SteamlessController\\cycle.request";
+    const std::wstring file = AppPaths::DataFile(L"cycle.request");
     if (paths.empty()) { DeleteFileW(file.c_str()); return; }
 
     FILE* f = nullptr;
@@ -345,6 +345,15 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_ENABLE_DEVICE:
             EnableDisabledControllerDevice();
             break;
+        case IDM_GATE_INSTALL:
+            RunGateCommand(true);
+            break;
+        case IDM_GATE_UNINSTALL:
+            RunGateCommand(false);
+            break;
+        case IDM_STEAM_RESTART:
+            RestartSteam();
+            break;
         case IDM_EXIT: {
             EventLog::Write("=== SteamlessController exiting (user request) ===");
             if (m_lease.GetState() == SteamInputLease::State::Blocking) {
@@ -389,6 +398,17 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // arrives the state may have moved again, and the window wants the
         // current answer, not the one that prompted the post.
         m_remapWindow.SetControlState(m_controller->IsGameModeActive(), !m_enabled);
+        return 0;
+
+    case WM_GATEDONE:
+        OnGateCommandDone(static_cast<DWORD>(wp));
+        return 0;
+
+    case WM_STEAMRESTARTED:
+        if (!wp)
+            MessageBoxW(nullptr, L"Steam did not exit within 30 seconds, so it was not "
+                                 L"restarted. Exit it from its own menu and start it again.",
+                        L"SteamlessController", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
         return 0;
 
     case WM_LEASESTATE:
@@ -1926,7 +1946,6 @@ void TrayApp::ShowViGEmBalloon() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-static constexpr wchar_t REG_KEY[]     = L"Software\\SteamlessController";
 static constexpr wchar_t REG_RUN_KEY[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 static constexpr wchar_t APP_NAME[]    = L"SteamlessController";
 
@@ -2084,16 +2103,17 @@ void TrayApp::UpdateStartupRegistration() {
 }
 
 void TrayApp::LoadSettings() {
-    HKEY key;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_READ, &key) != ERROR_SUCCESS)
+    SettingsStore& store = SettingsStore::Instance();
+    if (store.ImportedFromRegistry())
+        EventLog::Write("SETTINGS: first run with %ls — copied the settings and profiles "
+                        "an earlier build kept in the registry", store.Path().c_str());
+    // No settings at all is a fresh install, which keeps every in-class
+    // default. The migrations below are for files that predate them.
+    if (!store.HasSection(L"Settings"))
         return;
 
     auto readDw = [&](const wchar_t* name, DWORD def) -> DWORD {
-        DWORD val = 0, size = sizeof(val);
-        if (RegQueryValueExW(key, name, nullptr, nullptr,
-                             reinterpret_cast<LPBYTE>(&val), &size) == ERROR_SUCCESS)
-            return val;
-        return def;
+        return store.GetDw(L"Settings", name, def);
     };
 
     const bool isPlayStation = readDw(L"ControllerPlatform", 0) != 0;
@@ -2234,41 +2254,29 @@ void TrayApp::LoadSettings() {
                                                  RunKeyExists() ? 1 : 0));
     m_startupEnabled   = m_startupMechanism != 0;
 
-    RegCloseKey(key);
-
     m_gameProfiles = GameProfiles::Load();
 
     // Persist whatever was migrated and drop the retired values, so each
     // fill-in above runs exactly once and a later choice of "Off" is not
     // resurrected on the next launch.
     if (migrateBackMouse || migratePads || migrateModes) {
-        SaveSettings();
-        HKEY writeKey;
-        if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, KEY_SET_VALUE, &writeKey) == ERROR_SUCCESS) {
-            if (migrateBackMouse) RegDeleteValueW(writeKey, L"BackButtons");
-            if (migratePads) {
-                RegDeleteValueW(writeKey, L"TrackpadMouse");
-                RegDeleteValueW(writeKey, L"UseLeftTrackpad");
-            }
-            if (migrateModes) {
-                RegDeleteValueW(writeKey, L"AutoSteamMode");
-                RegDeleteValueW(writeKey, L"EnableOnLaunch");
-            }
-            RegCloseKey(writeKey);
+        if (migrateBackMouse) store.Remove(L"Settings", L"BackButtons");
+        if (migratePads) {
+            store.Remove(L"Settings", L"TrackpadMouse");
+            store.Remove(L"Settings", L"UseLeftTrackpad");
         }
+        if (migrateModes) {
+            store.Remove(L"Settings", L"AutoSteamMode");
+            store.Remove(L"Settings", L"EnableOnLaunch");
+        }
+        SaveSettings();
     }
 }
 
 void TrayApp::SaveSettings() {
-    HKEY key;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_KEY, 0, nullptr,
-                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr,
-                        &key, nullptr) != ERROR_SUCCESS)
-        return;
-
+    SettingsStore& store = SettingsStore::Instance();
     auto writeDw = [&](const wchar_t* name, DWORD val) {
-        RegSetValueExW(key, name, 0, REG_DWORD,
-                       reinterpret_cast<const BYTE*>(&val), sizeof(val));
+        store.SetDw(L"Settings", name, val);
     };
 
     writeDw(L"StartupMechanism",    static_cast<DWORD>(m_startupMechanism));
@@ -2313,7 +2321,142 @@ void TrayApp::SaveSettings() {
     // launch the per-pad values above are authoritative.
     writeDw(L"PadsMigrated", 1);
 
-    RegCloseKey(key);
+    if (!store.Save())
+        EventLog::Write("SETTINGS: could not write %ls", store.Path().c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Steam Input blocker
+// ---------------------------------------------------------------------------
+
+bool TrayApp::GateLoaded() const {
+    if (m_lease.GetState() == SteamInputLease::State::Blocking) return true;
+    SteamInputGate::Error error = SteamInputGate::Error::None;
+    const DWORD pid = SteamInputGate::FindSteam(error);
+    if (!pid) return false;
+    SteamInputGate::Status status;
+    return SteamInputGate::QueryStatus(pid, status, /*connectTimeoutMs=*/0)
+        == SteamInputGate::Error::None;
+}
+
+std::wstring TrayApp::GateStatusText(const SteamGate::Inspection& gate, bool loaded) const {
+    const bool steamRunning = m_steamWatcher.GetState() != SteamState::NoSteam;
+    switch (gate.status) {
+    case SteamGate::Status::SteamNotFound:
+        return L"Steam not found";
+    case SteamGate::Status::Blocked:
+        return L"Can't install: another program uses Steam's XInput1_4.dll and dinput8.dll";
+    case SteamGate::Status::NotInstalled:
+        if (!gate.bundled) return L"Not installed (steam_input_gate.dll is missing here)";
+        return loaded ? L"Removed - Steam drops it when it restarts" : L"Not installed";
+    case SteamGate::Status::Outdated:
+        return loaded ? L"Active - update available" : L"Installed - update available";
+    case SteamGate::Status::Installed:
+        if (loaded) return L"Active";
+        return steamRunning ? L"Installed - restart Steam to activate"
+                            : L"Installed - active once Steam starts";
+    }
+    return {};
+}
+
+void TrayApp::RunGateCommand(bool install) {
+    if (m_gateBusy) return;
+    const std::wstring steamDir = SteamGate::SteamDir();
+    if (steamDir.empty()) {
+        MessageBoxW(nullptr, L"Steam's folder could not be found.", L"Steam Input Blocker",
+                    MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        return;
+    }
+    // A result left by an earlier run must not be read as this one's.
+    DeleteFileW(AppPaths::DataFile(L"gate.result").c_str());
+
+    const std::wstring helper = HelperPath();
+    const std::wstring params = std::wstring(install ? L"--deploy-gate" : L"--park-gate")
+                              + L" \"" + steamDir + L"\"";
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize       = sizeof(sei);
+    sei.fMask        = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb       = L"runas";  // Steam's folder is under Program Files
+    sei.lpFile       = helper.c_str();
+    sei.lpParameters = params.c_str();
+    sei.nShow        = SW_HIDE;
+    EventLog::Write("GATE: %s requested for %ls", install ? "install" : "uninstall",
+                    steamDir.c_str());
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        const DWORD err = GetLastError();
+        EventLog::Write("GATE: helper did not start (error %lu)", err);
+        if (err != ERROR_CANCELLED)  // a declined UAC prompt needs no dialog
+            MessageBoxW(nullptr, L"The helper that installs the blocker could not be started.",
+                        L"Steam Input Blocker", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+        return;
+    }
+    m_gateBusy = true;
+    // The helper is quick, but waiting on it here would freeze the tray.
+    HWND hwnd = m_hwnd;
+    HANDLE process = sei.hProcess;
+    std::thread([hwnd, process] {
+        WaitForSingleObject(process, 60000);
+        DWORD code = 1;
+        GetExitCodeProcess(process, &code);
+        CloseHandle(process);
+        PostMessageW(hwnd, WM_GATEDONE, code, 0);
+    }).detach();
+}
+
+void TrayApp::OnGateCommandDone(DWORD exitCode) {
+    m_gateBusy = false;
+    std::wstring message;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, AppPaths::DataFile(L"gate.result").c_str(), L"r, ccs=UTF-8") == 0 && f) {
+        wchar_t line[1024];
+        if (fgetws(line, 1024, f) && fgetws(line, 1024, f)) {
+            message = line;
+            while (!message.empty() && (message.back() == L'\n' || message.back() == L'\r'))
+                message.pop_back();
+        }
+        fclose(f);
+    }
+    if (message.empty())
+        message = exitCode == 0 ? L"Done." : L"It did not finish; see cycle.log for details.";
+    EventLog::Write("GATE: helper finished with %lu: %ls", exitCode, message.c_str());
+
+    const bool steamRunning = m_steamWatcher.GetState() != SteamState::NoSteam;
+    if (exitCode == 0 && steamRunning) {
+        // The change only reaches Steam when it next starts; offer to do it now.
+        const std::wstring prompt = message + L"\n\nRestart Steam now?";
+        if (MessageBoxW(nullptr, prompt.c_str(), L"Steam Input Blocker",
+                        MB_YESNO | MB_ICONINFORMATION | MB_SETFOREGROUND) == IDYES)
+            RestartSteam();
+        return;
+    }
+    MessageBoxW(nullptr, message.c_str(), L"Steam Input Blocker",
+                MB_OK | (exitCode == 0 ? MB_ICONINFORMATION : MB_ICONWARNING) | MB_SETFOREGROUND);
+}
+
+void TrayApp::RestartSteam() {
+    const std::wstring steamDir = SteamGate::SteamDir();
+    if (steamDir.empty()) return;
+    const std::wstring steamExe = steamDir + L"\\steam.exe";
+    EventLog::Write("GATE: restarting Steam so it loads the current blocker");
+    HWND hwnd = m_hwnd;
+    std::thread([hwnd, steamExe] {
+        SteamInputGate::Error error = SteamInputGate::Error::None;
+        const DWORD pid = SteamInputGate::FindSteam(error);
+        HANDLE process = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
+        // Steam's own clean exit, so it saves its state; never a kill.
+        ShellExecuteW(nullptr, L"open", steamExe.c_str(), L"-shutdown", nullptr, SW_HIDE);
+        bool exited = true;
+        if (process) {
+            exited = WaitForSingleObject(process, 30000) == WAIT_OBJECT_0;
+            CloseHandle(process);
+        }
+        if (exited) {
+            // A moment for its helper processes to wind down after the main one.
+            Sleep(1500);
+            ShellExecuteW(nullptr, L"open", steamExe.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        PostMessageW(hwnd, WM_STEAMRESTARTED, exited ? 1 : 0, 0);
+    }).detach();
 }
 
 void TrayApp::ShowContextMenu() {
@@ -2414,6 +2557,33 @@ void TrayApp::ShowContextMenu() {
     AppendMenuW(profilesMenu, MF_STRING, IDM_EDIT_PROFILES, L"Edit Game Profiles...");
     AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(profilesMenu),
                 L"Game Profiles");
+
+    // The blocker: what state it is in, and what can be done about it.
+    {
+        const SteamGate::Inspection gate = SteamGate::Inspect();
+        const bool loaded = GateLoaded();
+        HMENU gateMenu = CreatePopupMenu();
+        AppendMenuW(gateMenu, MF_STRING | MF_GRAYED, 0, GateStatusText(gate, loaded).c_str());
+        AppendMenuW(gateMenu, MF_SEPARATOR, 0, nullptr);
+        const bool installed = gate.status == SteamGate::Status::Installed
+                            || gate.status == SteamGate::Status::Outdated;
+        const UINT busy = m_gateBusy ? MF_GRAYED : MF_ENABLED;
+        if (gate.bundled && (gate.status == SteamGate::Status::NotInstalled
+                             || gate.status == SteamGate::Status::Outdated))
+            AppendMenuW(gateMenu, MF_STRING | busy, IDM_GATE_INSTALL,
+                        gate.status == SteamGate::Status::Outdated ? L"Update..." : L"Install...");
+        if (installed)
+            AppendMenuW(gateMenu, MF_STRING | busy, IDM_GATE_UNINSTALL, L"Uninstall...");
+        // A restart is what makes Steam pick up an install, an update or an
+        // uninstall, so it is offered whenever Steam is running something
+        // other than what is on disk.
+        const bool steamRunning = m_steamWatcher.GetState() != SteamState::NoSteam;
+        if (steamRunning && ((installed && !loaded) || gate.status == SteamGate::Status::Outdated
+                             || (!installed && loaded)))
+            AppendMenuW(gateMenu, MF_STRING | busy, IDM_STEAM_RESTART, L"Restart Steam");
+        AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(gateMenu),
+                    L"Steam Input Blocker");
+    }
 
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // The default profile's bindings and pad type — what Steamless Mode means
