@@ -123,6 +123,19 @@ if (MSVC)
     set_target_properties(ViGEmBusProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
 endif()
 
+# Steam Input gate probe — takes, holds and releases leases against a live
+# Steam, so the gate can be proven on a machine before the tray relies on it
+add_executable(SteamInputLeaseProbe
+    src/probe/SteamInputLeaseProbe.cpp
+    src/app/SteamInputLease.cpp
+    src/app/EventLog.cpp
+)
+target_include_directories(SteamInputLeaseProbe PRIVATE src)
+if (MSVC)
+    target_compile_options(SteamInputLeaseProbe PRIVATE /W4 /WX /utf-8)
+    set_target_properties(SteamInputLeaseProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
+endif()
+
 # Elevated on-demand helper — restarts the controller device node so the tray
 # app (which never runs elevated) can take the device from a running Steam.
 add_executable(SteamlessDeviceCycle WIN32
