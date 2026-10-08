@@ -460,6 +460,10 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // Cheap probe — we are only asking whether anything woke up.
             if (m_wantControl)
                 TryAcquireController(WAKE_PROBE_MS);
+        } else if (wp == IDT_STEAM_HANDOFF) {
+            KillTimer(m_hwnd, IDT_STEAM_HANDOFF);
+            // Is the program holding the controller done with it yet?
+            if (m_steamHandoffHeld) EvaluateControl(/*immediate=*/true, /*userAction=*/false);
         } else if (wp == IDT_RELEASE_GRACE) {
             KillTimer(m_hwnd, IDT_RELEASE_GRACE);
             // Re-resolved rather than assumed: the settle exists precisely so
@@ -769,7 +773,13 @@ void TrayApp::OnForegroundChanged(const ForegroundIdentity& id) {
     // would apply their changes to the wrong game.
     if (m_remapWindow.IsOpen()) return;
 
-    if (!SelectProfile(MatchProfile(id))) return;
+    const std::wstring matched = MatchProfile(id);
+    // Which application it was, not only which profile — a profile-less
+    // window flashing in front (a launcher's splash, the desktop during a
+    // fullscreen switch) is otherwise invisible in the log.
+    if (matched != m_activeGameId)
+        EventLog::Write("FRONT: %ls", id.exePath.empty() ? L"(unknown)" : id.exePath.c_str());
+    if (!SelectProfile(matched)) return;
     // No push here: EvaluateControl pushes once it has decided the pad stays,
     // and holds off while a release is settling — pushing a profile whose pad
     // type differs rebuilds the virtual controller, so doing it on the way out
@@ -935,7 +945,33 @@ void TrayApp::EvaluateControl(bool immediate, bool userAction) {
 
     // Disengaging: lease last, once our handles are closed, so the gate's
     // rediscovery finds the device free.
-    if (!wantBlock) m_lease.SetWanted(false);
+    //
+    // But not while another program — with Steam blocked, that is something
+    // reading the controller directly, like an emulator in the background —
+    // still has it open. Steam would reopen the controller under it and apply
+    // its own settings, switching off the motion sensors that program turned
+    // on (SDL turns them on once, when it opens the controller, and never
+    // again). Steam waits until the controller is free; until then it stays
+    // blocked and the controller stays where it is.
+    if (!wantBlock && m_lease.Wanted()) {
+        const bool blocking = m_lease.GetState() == SteamInputLease::State::Blocking;
+        if (m_enabled && blocking && !m_cycleInFlight && m_controller->OthersHoldController()) {
+            if (!m_steamHandoffHeld)
+                EventLog::Write("CONTROL: holding Steam Input off - another program still has "
+                                "the controller open; Steam gets it once that program lets go");
+            m_steamHandoffHeld = true;
+            SetTimer(m_hwnd, IDT_STEAM_HANDOFF, STEAM_HANDOFF_RETRY_MS, nullptr);
+        } else {
+            if (m_steamHandoffHeld)
+                EventLog::Write("CONTROL: the controller is free - handing it to Steam");
+            m_steamHandoffHeld = false;
+            KillTimer(m_hwnd, IDT_STEAM_HANDOFF);
+            m_lease.SetWanted(false);
+        }
+    } else if (wantBlock && m_steamHandoffHeld) {
+        m_steamHandoffHeld = false;
+        KillTimer(m_hwnd, IDT_STEAM_HANDOFF);
+    }
 
     RefreshTrayIcon();  // also checks whether the switch has already landed
 }
@@ -1837,6 +1873,8 @@ void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool sharedHan
         if (shared) tip += L" (sharing with Steam)";
     } else if (padUnavailable) {
         tip += L"no virtual gamepad bus";
+    } else if (steamMeant && m_steamHandoffHeld) {
+        tip += L"Steam Input Mode (waiting for another app to let go of the controller)";
     } else if (steamMeant && !blocking) {
         icon = m_iconSteam;
         tip += L"Steam Input Mode";

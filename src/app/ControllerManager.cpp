@@ -391,7 +391,10 @@ ControllerManager::~ControllerManager() {
             slot->vc.reset();
             slot->gameModeActive = false;
         }
-        slot->sc->EnableLizardMode(); // always restore, even if game mode was never active
+        // Always restore, even if game mode was never active — but not under a
+        // program still using the controller, whose settings these now are.
+        if (slot->sc->OthersWriting()) slot->sc->QuietRelease();
+        else                           slot->sc->EnableLizardMode();
     }
     ReleaseDocks();
 }
@@ -1075,8 +1078,12 @@ void ControllerManager::OpenSlot(const std::wstring& path) {
         EnableGameModeSlot(*m_slots.back(), dummy, /*allowShared=*/true, 250,
                            /*recordSilent=*/true);
     } else {
-        // Restore lizard mode in case a previous session crashed without cleaning up.
-        m_slots.back()->sc->EnableLizardMode();
+        // Restore lizard mode in case a previous session crashed without
+        // cleaning up — unless another program has the controller open, in
+        // which case the settings are its own (an emulator that switched the
+        // motion sensors on would otherwise lose them for good).
+        if (!m_slots.back()->sc->OthersWriting())
+            m_slots.back()->sc->EnableLizardMode();
     }
 }
 
@@ -1162,7 +1169,7 @@ ControllerManager::EnableGameModeSlot(Slot& slot, bool& padUnavailableOut, bool 
         EventLog::Write("GAMEMODE: exclusive claim unavailable; using shared access %ls",
                         slot.path.c_str());
     }
-    if (!slot.sc->DisableLizardMode()) {
+    if (!slot.sc->DisableLizardMode(/*keepImu=*/claim == SteamController::AccessClaim::Shared)) {
         EventLog::Write("GAMEMODE: DisableLizardMode failed %ls", slot.path.c_str());
         slot.sc->ReleaseToShared();
         return GameModeOutcome::Blocked;
@@ -1188,7 +1195,8 @@ ControllerManager::EnableGameModeSlot(Slot& slot, bool& padUnavailableOut, bool 
         m_lastPadDriverMissing = slot.vc->IsDriverMissing();
         padUnavailableOut      = true;
         slot.vc.reset();
-        slot.sc->EnableLizardMode();
+        if (slot.sc->OthersWriting()) slot.sc->QuietRelease();
+        else                          slot.sc->EnableLizardMode();
         // Hand the device back. Without a virtual pad this slot is going
         // nowhere, and an exclusive handle held for nothing locks Steam out
         // and makes the app itself the holder that vetoes its own device
@@ -1247,7 +1255,17 @@ void ControllerManager::DisableGameModeSlot(Slot& slot) {
     slot.triggerRaw[0].store(0, std::memory_order_relaxed);
     slot.triggerRaw[1].store(0, std::memory_order_relaxed);
     slot.vc.reset();
-    slot.sc->EnableLizardMode();
+    // Lizard mode back — unless another program shares the controller and is
+    // still using it. SDL keeps lizard mode off itself, and turns the motion
+    // sensors on only once, when it opens the controller; restoring defaults
+    // under it is what left Dolphin with buttons but no gyro.
+    if (slot.sc->OthersWriting()) {
+        EventLog::Write("GAMEMODE: another program still has the controller open — "
+                        "leaving its settings alone");
+        slot.sc->QuietRelease();
+    } else {
+        slot.sc->EnableLizardMode();
+    }
     // Reopen shared so Steam can obtain write access — game mode is no longer active.
     slot.sc->ReleaseToShared();
     slot.gameModeActive = false;
@@ -1277,6 +1295,17 @@ void ControllerManager::UpdateBattery(uint8_t percent, uint8_t chargeState) {
         m_battery.updatedTick = GetTickCount64();
     }
     if (changed && m_batteryFn) m_batteryFn();
+}
+
+bool ControllerManager::OthersHoldController() {
+    if (m_slots.empty()) SyncDevices();
+    StopAllPassive();
+    bool held = false;
+    for (auto& slot : m_slots)
+        if (!slot->gameModeActive && slot->sc && slot->sc->IsOpen() && slot->sc->OthersWriting())
+            held = true;
+    UpdatePassive();
+    return held;
 }
 
 void ControllerManager::StopAllPassive() {
@@ -1404,7 +1433,12 @@ void ControllerManager::ReadLoop(Slot* slot) {
             }
             const bool imuWanted = dsuWanted
                                 || m_profile.platform == ControllerPlatform::PlayStation;
-            if (imuWanted != slot->imuOn && slot->sc->SetImuEnabled(imuWanted))
+            // On a handle open to others, sensors are only ever switched on:
+            // whoever shares the controller may be using them, and SDL never
+            // switches them back on once they are off.
+            const bool openToOthers = slot->sharedHandle || slot->openShared;
+            if (imuWanted != slot->imuOn && (imuWanted || !openToOthers)
+                    && slot->sc->SetImuEnabled(imuWanted))
                 slot->imuOn = imuWanted;
         }
 

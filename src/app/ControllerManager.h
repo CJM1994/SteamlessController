@@ -167,6 +167,12 @@ public:
         uint64_t  updatedTick = 0;   // GetTickCount64 of the last report
     };
     BatteryInfo Battery() const;
+
+    // Whether a program other than us has the controller open for writing —
+    // an emulator reading it directly. Opens the interfaces first if they are
+    // not open. Only meaningful while Steam is blocked (it then holds none).
+    // Checks each interface not in game mode; UI thread only.
+    bool OthersHoldController();
     // Fires on a read thread whenever a report changes the level or charge
     // state. Marshal before touching UI (PostMessage). Set once, early.
     void SetBatteryCallback(std::function<void()> fn) { m_batteryFn = std::move(fn); }

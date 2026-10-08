@@ -184,7 +184,10 @@ public:
 
     // Two-step sequence: clears digital mappings + sets trackpads to NONE.
     // Starts the background rumble thread.
-    bool DisableLizardMode();
+    //
+    // keepImu leaves the motion sensors as they are, for when another program
+    // shares the controller and may have switched them on for itself.
+    bool DisableLizardMode(bool keepImu = false);
 
     // Restores default mappings. Should be called before process exit.
     bool EnableLizardMode();
@@ -203,6 +206,18 @@ public:
     // to open the device for write. Call after EnableLizardMode() when leaving
     // game mode so Steam can reclaim the controller.
     void ReleaseToShared();
+
+    // Whether another program holds the controller open for writing — an
+    // emulator reading it through SDL, say. Asked by trying for write
+    // exclusivity, which fails while anyone else can write, and leaves the
+    // handle open shared either way. Its settings are then the other
+    // program's: resetting them (lizard mode, the motion sensors) would undo
+    // what it set up and does not re-send. No read may be in flight.
+    bool OthersWriting();
+
+    // Let go without touching the controller's settings: stop rumble, nothing
+    // else. For releasing a controller another program is still using.
+    void QuietRelease();
 
     // Read the next raw input report. buffer[0] = report ID on return.
     // Returns 0 on timeout.

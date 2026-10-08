@@ -220,7 +220,18 @@ void SteamController::ReleaseToShared() {
 // Lizard mode
 // ---------------------------------------------------------------------------
 
-bool SteamController::DisableLizardMode() {
+bool SteamController::OthersWriting() {
+    const bool alone = m_device.Reopen(FILE_SHARE_READ);
+    m_device.Reopen(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    return !alone;
+}
+
+void SteamController::QuietRelease() {
+    StopRumbleThread();
+    SetRumble(0, 0);
+}
+
+bool SteamController::DisableLizardMode(bool keepImu) {
     uint8_t buf[64];
 
     BuildCmd(buf, CMD_CLEAR_DIGITAL_MAPPINGS);
@@ -232,10 +243,11 @@ bool SteamController::DisableLizardMode() {
         }
     }
 
-    // Keep IMU disabled until a virtual output mode that needs it explicitly enables it.
+    // Keep IMU disabled until a virtual output mode that needs it explicitly
+    // enables it — unless someone sharing the controller may be using it.
     const uint8_t imuOff[] = { SETTING_IMU_MODE, 0x00, 0x00 };
     BuildCmd(buf, CMD_SET_SETTINGS, imuOff, sizeof(imuOff));
-    {
+    if (!keepImu) {
         std::lock_guard<std::mutex> lock(m_writeMutex);
         if (!m_device.SendFeatureReport(buf, sizeof(buf))) {
             printf("Failed to disable IMU mode.\n");

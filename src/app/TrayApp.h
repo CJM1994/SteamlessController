@@ -328,6 +328,9 @@ private:
     std::vector<std::wstring>          m_menuProfileIds;
     // An install or uninstall is running; the menu offers neither meanwhile.
     bool                               m_gateBusy = false;
+    // Steam Input is what the mode asks for, but another program still has
+    // the controller open, so the lease is being kept until it lets go.
+    bool                               m_steamHandoffHeld = false;
     // The lowest battery threshold already warned about on this discharge, so
     // each warning shows once; reset by charging or by the level recovering.
     int                                m_batteryWarnedAt = 101;
@@ -430,6 +433,10 @@ private:
     static constexpr UINT_PTR IDT_CYCLE_WATCHDOG  = 7;
     // 8 was IDT_GAME_LIVENESS, retired with the running-game hold.
     static constexpr UINT_PTR IDT_DOCK_CYCLE      = 9;
+    // While Steam Input is held off for a program still using the controller:
+    // how often to look again.
+    static constexpr UINT_PTR IDT_STEAM_HANDOFF   = 10;
+    static constexpr UINT STEAM_HANDOFF_RETRY_MS  = 2000;
     // Long enough that idling for a month costs a fraction of the log's 512 KB,
     // short enough to bound when the app stopped responding to within a
     // quarter hour. Resolution only has to beat "somewhere in the last 33
