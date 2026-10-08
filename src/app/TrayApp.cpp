@@ -162,12 +162,14 @@ bool TrayApp::Init(HINSTANCE hInstance) {
         PostMessageW(m_hwnd, WM_ALERT, 0, 0);
     };
     m_controller->SetAlertCallback(raiseAlert);
+    m_controller->SetBatteryCallback([this] { PostMessageW(m_hwnd, WM_BATTERY, 0, 0); });
     // Blocked input reaches the user the same way a dead controller does: it
     // presents identically — nothing happens — and the cause is something only
     // this app is in a position to name.
     InputInjection::SetAlertCallback(raiseAlert);
 
     LoadSettings();
+    ApplyDsu();
     // Converge the startup mechanism with the loaded mode — e.g. the first
     // elevated run after enabling in-game mode migrates the Run key to the
     // highest-privileges logon task (and back when the mode changes).
@@ -354,6 +356,16 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDM_STEAM_RESTART:
             RestartSteam();
             break;
+        case IDM_DSU_ENABLE:
+            m_dsuEnabled = !m_dsuEnabled;
+            EventLog::Write("USER: gyro for emulators (DSU) %s", m_dsuEnabled ? "on" : "off");
+            SaveSettings();
+            ApplyDsu();
+            break;
+        case IDM_DSU_RECALIBRATE:
+            m_controller->RecalibrateGyro();
+            EventLog::Write("USER: gyro drift recalibration requested");
+            break;
         case IDM_EXIT: {
             EventLog::Write("=== SteamlessController exiting (user request) ===");
             if (m_lease.GetState() == SteamInputLease::State::Blocking) {
@@ -398,6 +410,10 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // arrives the state may have moved again, and the window wants the
         // current answer, not the one that prompted the post.
         m_remapWindow.SetControlState(m_controller->IsGameModeActive(), !m_enabled);
+        return 0;
+
+    case WM_BATTERY:
+        OnBatteryChanged();
         return 0;
 
     case WM_GATEDONE:
@@ -459,6 +475,9 @@ LRESULT TrayApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // Logged loudly on purpose: this should never fire, and if it does
             // in the field the log says so rather than the user having to
             // notice the controller behaving oddly.
+            // Also keeps the tooltip's battery line honest when reports stop
+            // (controller switched off), which no event announces.
+            RefreshTrayIcon();
             const SteamState now = m_steamWatcher.GetState();
             if (now != m_lastAppliedSteamState) {
                 EventLog::Write("AUTO: steam state %d was never applied (last acted on %d) "
@@ -998,8 +1017,12 @@ void TrayApp::ReleaseControl(ReleaseArrival arrival) {
     // Shared with a program that kept its own handle throughout: it never
     // lost the controller, so it has no arrival to wait for, and a cycle now
     // would be vetoed by that very handle and end in PnP yanking the device.
-    if (arrival == ReleaseArrival::Always && hadControl && m_controller->IsGameModeShared()) {
-        EventLog::Write("RELEASE: another program kept its handle while we shared — "
+    //
+    // The same holds when we opened it shared by choice: anything that started
+    // since opened its own full handle, and anything starting later finds the
+    // controller free.
+    if (arrival == ReleaseArrival::Always && hadControl && m_controller->IsGameModeOpenShared()) {
+        EventLog::Write("RELEASE: the controller was open to others while we held it — "
                         "no arrival needed");
         arrival = ReleaseArrival::Never;
     }
@@ -1100,8 +1123,16 @@ void TrayApp::TryAcquireController(uint32_t stateWaitMs) {
     //
     // Never without the gate. Then the other writer is likely Steam, and
     // driving a pad alongside Steam Input is worse than not running at all.
+    //
+    // And not only when someone is already there: opened shared from the
+    // start, an emulator a front end launches while we hold the pad can still
+    // open the controller in full, and switching to it later is just letting
+    // go — no device restart for its handle to veto. Opened exclusively, the
+    // emulator gets a half-usable handle at startup, which then blocks the
+    // restart meant to hand it the controller, and the PnP fallback yanks the
+    // device out from under it for good.
     const bool shareWithOthers = m_lease.GetState() == SteamInputLease::State::Blocking;
-    auto outcome = m_controller->EnableGameMode(stateWaitMs, shareWithOthers);
+    auto outcome = m_controller->EnableGameMode(stateWaitMs, shareWithOthers, shareWithOthers);
 
     // A short burst of rapid retries, for the cases where the answer can change
     // within milliseconds: a slot that has not started streaming yet, or a
@@ -1124,7 +1155,7 @@ void TrayApp::TryAcquireController(uint32_t stateWaitMs) {
                  && !m_controller->IsGameModeActive(); ++i) {
         Sleep(50);
         m_controller->OnDeviceChange();
-        outcome = m_controller->EnableGameMode(stateWaitMs, shareWithOthers);
+        outcome = m_controller->EnableGameMode(stateWaitMs, shareWithOthers, shareWithOthers);
     }
     {
         // Where the attempt actually spent its time. Logged for every attempt,
@@ -1819,6 +1850,8 @@ void TrayApp::UpdateTrayIcon(bool connected, bool gameModeActive, bool sharedHan
         const std::string why = rule;
         tip += L" — " + std::wstring(why.begin(), why.end());
     }
+    // The battery, on a line of its own — the same text the menu shows.
+    tip += L"\n" + BatteryText();
 
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
@@ -1872,6 +1905,7 @@ void TrayApp::ShowModeNotification(const ModeState& state, const std::wstring& r
 }
 
 void TrayApp::RefreshTrayIcon() {
+    if (!m_controller) return;
     UpdateTrayIcon(m_controller->IsConnected(), m_controller->IsGameModeActive(),
                    m_controller->IsGameModeShared(), false);
 }
@@ -2248,6 +2282,20 @@ void TrayApp::LoadSettings() {
 
     m_notificationsEnabled = readDw(L"ShowNotifications", 1) != 0;
 
+    // Gyro for emulators. Every value is optional, with sc2dsu's defaults.
+    m_dsuEnabled = readDw(L"DsuEnabled", 1) != 0;
+    {
+        const DWORD port = readDw(L"DsuPort", DsuServer::DEFAULT_PORT);
+        m_dsuPort = port > 0 && port < 65536 ? static_cast<uint16_t>(port)
+                                             : DsuServer::DEFAULT_PORT;
+    }
+    m_dsuLan = readDw(L"DsuExposeToNetwork", 0) != 0;
+    m_dsuConfig.gyroSensitivity = static_cast<float>(readDw(L"DsuGyroSensitivityPercent", 100))
+                                / 100.0f;
+    m_dsuConfig.autoCalibrate   = readDw(L"DsuAutoCalibrate", 1) != 0;
+    DsuAxisMap::Parse(store.GetSz(L"Settings", L"DsuGyroAxes"),  m_dsuConfig.gyro);
+    DsuAxisMap::Parse(store.GetSz(L"Settings", L"DsuAccelAxes"), m_dsuConfig.accel);
+
     // Startup mechanism: 0 none, 1 Run key, 2 elevated task. Migrate installs
     // that predate the setting by probing the Run key they would have used.
     m_startupMechanism = static_cast<int>(readDw(L"StartupMechanism",
@@ -2285,6 +2333,16 @@ void TrayApp::SaveSettings() {
     writeDw(L"DefaultBehavior",     static_cast<DWORD>(m_defaultBehavior));
     writeDw(L"UseGameProfiles",     m_useGameProfiles ? 1 : 0);
     writeDw(L"SteamOverride",       static_cast<DWORD>(m_steamOverride));
+    // Written out in full, defaults included, so they can be found and edited
+    // in settings.ini by hand — the axes and sensitivity have no other UI yet.
+    writeDw(L"DsuEnabled",          m_dsuEnabled ? 1 : 0);
+    writeDw(L"DsuPort",             m_dsuPort);
+    writeDw(L"DsuExposeToNetwork",  m_dsuLan ? 1 : 0);
+    writeDw(L"DsuGyroSensitivityPercent",
+            static_cast<DWORD>(m_dsuConfig.gyroSensitivity * 100.0f + 0.5f));
+    writeDw(L"DsuAutoCalibrate",    m_dsuConfig.autoCalibrate ? 1 : 0);
+    store.SetSz(L"Settings", L"DsuGyroAxes",  m_dsuConfig.gyro.ToString());
+    store.SetSz(L"Settings", L"DsuAccelAxes", m_dsuConfig.accel.ToString());
     // Its presence tells the next launch the four values above are
     // authoritative and the old control mode is not to be converted again.
     writeDw(L"BehaviorsMigrated",   1);
@@ -2323,6 +2381,86 @@ void TrayApp::SaveSettings() {
 
     if (!store.Save())
         EventLog::Write("SETTINGS: could not write %ls", store.Path().c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Battery
+// ---------------------------------------------------------------------------
+
+std::wstring TrayApp::BatteryText() const {
+    // The controller manager reports its first state from inside its own
+    // constructor — before m_controller is assigned — so this can be asked
+    // while there is no manager to ask yet.
+    if (!m_controller) return L"No controller connected";
+    const auto battery = m_controller->Battery();
+    if (battery.percent < 0)
+        return m_controller->IsConnected() ? L"Controller battery: checking..."
+                                           : L"No controller connected";
+    if (GetTickCount64() - battery.updatedTick > BATTERY_STALE_MS)
+        return L"Controller battery: not reporting (off or asleep?)";
+    std::wstring text = L"Controller battery: " + std::to_wstring(battery.percent) + L"%";
+    if (battery.chargeState == SteamController::CHARGE_STATE_CHARGING)
+        text += L" (charging)";
+    else if (battery.chargeState == SteamController::CHARGE_STATE_CHARGING_DONE)
+        text += L" (charged)";
+    return text;
+}
+
+void TrayApp::OnBatteryChanged() {
+    if (!m_controller) return;
+    RefreshTrayIcon();
+    const auto battery = m_controller->Battery();
+    if (battery.percent < 0) return;
+
+    const bool discharging = battery.chargeState == SteamController::CHARGE_STATE_DISCHARGING;
+    // Plugging it in, or the level coming back up, re-arms both warnings.
+    if (!discharging || battery.percent > LOW_BATTERY + 5) {
+        m_batteryWarnedAt = 101;
+        return;
+    }
+    int threshold = 0;
+    if (battery.percent <= CRITICAL_BATTERY && m_batteryWarnedAt > CRITICAL_BATTERY)
+        threshold = CRITICAL_BATTERY;
+    else if (battery.percent <= LOW_BATTERY && m_batteryWarnedAt > LOW_BATTERY)
+        threshold = LOW_BATTERY;
+    if (!threshold) return;
+    m_batteryWarnedAt = threshold;
+
+    EventLog::Write("BATTERY: low-battery notice at %d%%", battery.percent);
+    if (!m_notificationsEnabled) return;
+    const bool critical = threshold == CRITICAL_BATTERY;
+    m_overlay.Show(m_hInstance, IDI_ICON_OFF,
+                   critical ? RGB(235, 64, 64) : RGB(240, 170, 40),
+                   critical ? L"Controller battery critical" : L"Controller battery low",
+                   std::to_wstring(battery.percent) + L"% left",
+                   critical ? L"It will switch off soon - charge it now"
+                            : L"Charge it soon",
+                   MonitorFromWindow(ForegroundWatcher::FrontWindow(),
+                                     MONITOR_DEFAULTTOPRIMARY));
+}
+
+// ---------------------------------------------------------------------------
+// Gyro for emulators (DSU)
+// ---------------------------------------------------------------------------
+
+void TrayApp::ApplyDsu() {
+    if (!m_dsuEnabled) {
+        m_controller->SetDsu(nullptr, m_dsuConfig);
+        m_dsu.Stop();
+        m_dsuError.clear();
+        return;
+    }
+    if (!m_dsu.Running() || m_dsu.Port() != m_dsuPort) {
+        std::wstring error;
+        if (!m_dsu.Start(m_dsuPort, m_dsuLan, error)) {
+            m_dsuError = error;
+            EventLog::Write("DSU: not started: %ls", error.c_str());
+            m_controller->SetDsu(nullptr, m_dsuConfig);
+            return;
+        }
+        m_dsuError.clear();
+    }
+    m_controller->SetDsu(&m_dsu, m_dsuConfig);
 }
 
 // ---------------------------------------------------------------------------
@@ -2475,6 +2613,11 @@ void TrayApp::ShowContextMenu() {
 
     HMENU menu = CreatePopupMenu();
 
+    // The battery, first and on its own: the one thing here worth a glance
+    // every time the menu opens. Worded identically in every mode.
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, BatteryText().c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+
     // Only present when it applies, and first when it does: with the devnode
     // switched off nothing else on this menu can do anything useful, and every
     // other entry will be reporting "no controller detected" for a reason the
@@ -2557,6 +2700,31 @@ void TrayApp::ShowContextMenu() {
     AppendMenuW(profilesMenu, MF_STRING, IDM_EDIT_PROFILES, L"Edit Game Profiles...");
     AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(profilesMenu),
                 L"Game Profiles");
+
+    // Gyro for emulators: on or off, and whether anything is listening.
+    {
+        HMENU dsuMenu = CreatePopupMenu();
+        std::wstring status;
+        if (!m_dsuEnabled) {
+            status = L"Off";
+        } else if (!m_dsu.Running()) {
+            status = m_dsuError.empty() ? L"Not running" : m_dsuError;
+        } else {
+            const int subs = m_dsu.Subscribers();
+            status = (m_dsuLan ? L"0.0.0.0:" : L"127.0.0.1:") + std::to_wstring(m_dsuPort)
+                   + L" - " + (subs ? std::to_wstring(subs) + L" emulator(s) connected"
+                                    : std::wstring(L"no emulator connected"));
+            if (!m_controller->IsGameModeActive()) status += L" (serves in Steamless Mode)";
+        }
+        AppendMenuW(dsuMenu, MF_STRING | MF_GRAYED, 0, status.c_str());
+        AppendMenuW(dsuMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(dsuMenu, MF_STRING | (m_dsuEnabled ? MF_CHECKED : MF_UNCHECKED),
+                    IDM_DSU_ENABLE, L"Enabled");
+        AppendMenuW(dsuMenu, MF_STRING | (m_dsu.Running() ? MF_ENABLED : MF_GRAYED),
+                    IDM_DSU_RECALIBRATE, L"Recalibrate Gyro (set the controller down first)");
+        AppendMenuW(menu, MF_STRING | MF_POPUP, reinterpret_cast<UINT_PTR>(dsuMenu),
+                    L"Gyro for Emulators (DSU)");
+    }
 
     // The blocker: what state it is in, and what can be done about it.
     {

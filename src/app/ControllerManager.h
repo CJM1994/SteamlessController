@@ -1,6 +1,7 @@
 #pragma once
 #include "BackButtonConfig.h"
 #include "ControllerPlatform.h"
+#include "DsuMotion.h"
 #include "TrackpadConfig.h"
 #include <atomic>
 #include <functional>
@@ -52,7 +53,11 @@ public:
     // thing that can invalidate the other handle and win exclusivity. True
     // settles for sharing the controller. The caller owns that policy because
     // it owns the retry budget; see TrayApp's acquire path.
-    GameModeOutcome EnableGameMode(uint32_t stateWaitMs = 250, bool allowShared = false);
+    //
+    // preferShared opens every slot shared from the start (see
+    // SteamController::ClaimGameModeAccess). It implies allowShared.
+    GameModeOutcome EnableGameMode(uint32_t stateWaitMs = 250, bool allowShared = false,
+                                   bool preferShared = false);
     void DisableGameMode();
     // Disables game mode then closes all device handles so another process
     // (e.g. Steam) can claim the controller. Safe to call when already disabled.
@@ -98,6 +103,10 @@ public:
     // collection entirely; a shared one leaves Steam free to keep driving the
     // same controller, which is worth surfacing rather than hiding.
     bool IsGameModeShared()         const;
+    // Whether game mode is running on a handle left open to other writers —
+    // by necessity (IsGameModeShared) or by choice. Either way, whoever else
+    // has the controller kept their own handle on it the whole time.
+    bool IsGameModeOpenShared()     const;
     // The interface that last had a controller in it. A receiver publishes one
     // per slot and only one is ever occupied, so this is what a cycle actually
     // needs to touch — see the request file the helper reads.
@@ -147,6 +156,28 @@ public:
     // would be wrong). Both are only meaningful after a failed enable.
     bool                LastPadDriverMissing() const { return m_lastPadDriverMissing; }
     const std::wstring& LastBusReport()        const { return m_lastBusReport; }
+
+    // The controller's battery, as its own reports give it — the same way in
+    // every mode. In game mode the read loop sees them; otherwise a read-only
+    // listener on the open interfaces does (see the passive loop), which sends
+    // the controller nothing. They arrive every few seconds to half a minute.
+    struct BatteryInfo {
+        int       percent     = -1;  // -1 = no report yet
+        uint8_t   chargeState = 0;   // SteamController::CHARGE_STATE_*
+        uint64_t  updatedTick = 0;   // GetTickCount64 of the last report
+    };
+    BatteryInfo Battery() const;
+    // Fires on a read thread whenever a report changes the level or charge
+    // state. Marshal before touching UI (PostMessage). Set once, early.
+    void SetBatteryCallback(std::function<void()> fn) { m_batteryFn = std::move(fn); }
+
+    // Gyro for emulators over DSU (see DsuServer). Null turns it off. The
+    // server must outlive every read loop; the tray owns both and stops this
+    // manager's slots before the server goes. Safe to call while running:
+    // each read loop picks the change up on its next frame.
+    void SetDsu(DsuServer* server, const DsuMotionConfig& config);
+    // Drop the learned gyro drift on every controller and learn it afresh.
+    void RecalibrateGyro() { m_dsuRecalibrate.fetch_add(1); }
 
     // Called by RemapWindow when a row enters/exits listening state.
     // Callback fires on the read thread — use PostMessage to marshal to the UI thread.
@@ -215,11 +246,38 @@ private:
     // acquire says so once rather than on each pass.
     std::vector<std::wstring>          m_dockClaimFailed;
     bool                               m_lastPadDriverMissing = false;
+    // What the last EnableGameMode asked for, for a slot that claims on its
+    // own outside the sweep.
+    bool                               m_preferShared = false;
     std::wstring                       m_lastBusReport;
     // The last line LogPadSettings wrote, so a setting that did not change
     // does not write one. SetProfile runs on every foreground switch.
     std::string                        m_lastPadDescription;
     ControllerProfile                  m_profile;
+
+    // DSU. The server pointer and config are read by the read threads, so
+    // they change under a mutex, and a generation tells a read loop when its
+    // copy is stale without taking the mutex every frame.
+    std::mutex                         m_dsuMutex;
+    DsuServer*                         m_dsu = nullptr;
+    DsuMotionConfig                    m_dsuConfig;
+    std::atomic<uint32_t>              m_dsuGeneration{0};
+    std::atomic<uint32_t>              m_dsuRecalibrate{0};
+    // Which DSU ports have a controller on them; UI thread only.
+    bool                               m_dsuSlotUsed[DsuServer::MAX_SLOTS] = {};
+
+    // Battery, updated from read threads.
+    mutable std::mutex                 m_batteryMutex;
+    BatteryInfo                        m_battery;
+    std::function<void()>              m_batteryFn;
+    void UpdateBattery(uint8_t percent, uint8_t chargeState);
+    // The read-only battery listener on slots not in game mode. Every handle
+    // reopen and every slot teardown stops them first (a listener reading a
+    // handle being reopened under it is undefined); UpdatePassive restarts
+    // them wherever they belong once the operation is done. UI thread only.
+    void StopAllPassive();
+    void UpdatePassive();
+    void PassiveLoop(Slot* slot);
 
     std::atomic<bool>                            m_capturing{false};
     std::mutex                                   m_captureMutex;

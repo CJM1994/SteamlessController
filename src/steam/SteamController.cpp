@@ -186,9 +186,17 @@ bool SteamController::WaitForStateReport(uint32_t timeoutMs) {
 // Exclusive access control
 // ---------------------------------------------------------------------------
 
-SteamController::AccessClaim SteamController::ClaimGameModeAccess() {
+SteamController::AccessClaim SteamController::ClaimGameModeAccess(bool preferShared) {
     // The read thread must already be stopped before calling Reopen — the
     // caller (EnableGameModeSlot) calls this before starting the read loop.
+    if (preferShared) {
+        // The exclusive open is only a question — is anyone else writing? —
+        // answered and given straight back.
+        const bool alone = m_device.Reopen(FILE_SHARE_READ);
+        if (m_device.Reopen(FILE_SHARE_READ | FILE_SHARE_WRITE))
+            return alone ? AccessClaim::Cooperative : AccessClaim::Shared;
+        return AccessClaim::Failed;
+    }
     if (m_device.Reopen(FILE_SHARE_READ))
         return AccessClaim::Exclusive;
 

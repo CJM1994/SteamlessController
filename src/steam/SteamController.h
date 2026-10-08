@@ -30,8 +30,12 @@ public:
 
     enum class AccessClaim {
         Failed,
-        Shared,
+        Shared,       // another process holds a write handle too
         Exclusive,
+        // Opened shared by choice, with nobody else writing at the time. Left
+        // open to others so a program started later can still take the
+        // controller in full — see ClaimGameModeAccess(preferShared).
+        Cooperative,
     };
 
     // Input report IDs (device → host)
@@ -187,7 +191,13 @@ public:
 
     // Prefer a write-exclusive handle, falling back to shared access when a
     // compatible system handle is already open. Call before DisableLizardMode().
-    AccessClaim ClaimGameModeAccess();
+    //
+    // preferShared opens it shared regardless, and reports which of Shared and
+    // Cooperative that was, by whether exclusivity was available a moment
+    // before. For when nothing needs keeping out (the Steam Input gate has
+    // Steam blocked) and something started later — an emulator launched from
+    // a front end — must be able to open it fully rather than half-way.
+    AccessClaim ClaimGameModeAccess(bool preferShared = false);
 
     // Reopen the device handle with full share flags, allowing other processes
     // to open the device for write. Call after EnableLizardMode() when leaving

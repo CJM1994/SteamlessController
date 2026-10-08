@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 #include "ControllerPlatform.h"
+#include "DsuMotion.h"
+#include "DsuServer.h"
 #include "DeviceRestart.h"
 #include "ForegroundWatcher.h"
 #include "ModeOverlay.h"
@@ -183,6 +185,17 @@ private:
     // Exit Steam and start it again, so it loads (or drops) the gate. Off the
     // UI thread: waiting for Steam to exit takes seconds.
     void RestartSteam();
+
+    // Start, stop or reconfigure the DSU server to match the settings, and
+    // hand the controller manager what it needs to feed it.
+    void ApplyDsu();
+
+    // The battery line, worded the same in the menu and the tooltip whatever
+    // the mode — e.g. "Controller battery: 82%", "... 82% (charging)".
+    std::wstring BatteryText() const;
+    // A new battery report: refresh the tooltip, and warn once on the way down
+    // through each of LOW_BATTERY and CRITICAL_BATTERY.
+    void OnBatteryChanged();
     void TryAcquireController(uint32_t stateWaitMs = 250);
     // Take a dock Steam still holds, once the controller is ours.
     void CycleUnheldDocks();
@@ -236,6 +249,15 @@ private:
     SteamInputLease                    m_lease;
     // The on-screen notice for mode switches; see ShowModeNotification.
     ModeOverlay                        m_overlay;
+    // Gyro for emulators. Declared ahead of m_controller so it is destroyed
+    // after it: the controller's read threads publish into it until they stop.
+    DsuServer                          m_dsu;
+    bool                               m_dsuEnabled = true;
+    uint16_t                           m_dsuPort    = DsuServer::DEFAULT_PORT;
+    bool                               m_dsuLan     = false;
+    DsuMotionConfig                    m_dsuConfig;
+    // Why the server is not running when it should be (the port taken).
+    std::wstring                       m_dsuError;
     // The last resolution logged, so a line is written on a change rather
     // than on every foreground switch.
     std::string                        m_lastResolution;
@@ -306,6 +328,14 @@ private:
     std::vector<std::wstring>          m_menuProfileIds;
     // An install or uninstall is running; the menu offers neither meanwhile.
     bool                               m_gateBusy = false;
+    // The lowest battery threshold already warned about on this discharge, so
+    // each warning shows once; reset by charging or by the level recovering.
+    int                                m_batteryWarnedAt = 101;
+    static constexpr int LOW_BATTERY      = 15;
+    static constexpr int CRITICAL_BATTERY = 5;
+    // Reports come every few seconds to half a minute; this long without one
+    // means the controller is off, asleep or out of range.
+    static constexpr ULONGLONG BATTERY_STALE_MS = 60000;
     std::mutex                         m_alertMutex;   // guards the two alert strings
     std::wstring                       m_alertTitle;   // set on read threads,
     std::wstring                       m_alertText;    // consumed on WM_ALERT
@@ -364,6 +394,8 @@ private:
     static constexpr UINT IDM_GATE_INSTALL     = 1022;
     static constexpr UINT IDM_GATE_UNINSTALL   = 1023;
     static constexpr UINT IDM_STEAM_RESTART    = 1024;
+    static constexpr UINT IDM_DSU_ENABLE       = 1025;
+    static constexpr UINT IDM_DSU_RECALIBRATE  = 1026;
     // One per ControllerBehavior value, offset by the value itself.
     static constexpr UINT IDM_DEFAULT_BASE     = 1100;
     // Game profile i, behaviour b: IDM_PROFILE_BASE + i * IDM_PROFILE_STRIDE + b,
@@ -386,6 +418,8 @@ private:
     static constexpr UINT WM_GATEDONE       = WM_APP + 6;
     // A Steam restart we asked for finished; WPARAM is nonzero on success.
     static constexpr UINT WM_STEAMRESTARTED = WM_APP + 7;
+    // The controller's battery report changed; posted from a read thread.
+    static constexpr UINT WM_BATTERY        = WM_APP + 8;
     static constexpr UINT TRAY_UID          = 1;
     static constexpr UINT_PTR IDT_ACQUIRE         = 1;
     static constexpr UINT_PTR IDT_ACQUIRE_VERDICT = 2;

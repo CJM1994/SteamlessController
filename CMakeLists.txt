@@ -160,6 +160,22 @@ if (MSVC)
     set_target_properties(SteamInputLeaseProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
 endif()
 
+# DSU client probe — checks the tray app's gyro server without an emulator,
+# and with --selftest checks the protocol with no controller at all
+add_executable(DsuProbe
+    src/probe/DsuProbe.cpp
+    src/app/DsuServer.cpp
+    src/app/DsuMotion.cpp
+    src/app/EventLog.cpp
+    src/app/AppPaths.cpp
+)
+target_include_directories(DsuProbe PRIVATE src)
+target_link_libraries(DsuProbe PRIVATE ws2_32)
+if (MSVC)
+    target_compile_options(DsuProbe PRIVATE /W4 /WX /utf-8)
+    set_target_properties(DsuProbe PROPERTIES LINK_FLAGS_DEBUG "/SUBSYSTEM:CONSOLE")
+endif()
+
 # Elevated on-demand helper — restarts the controller device node so the tray
 # app (which never runs elevated) can take the device from a running Steam.
 add_executable(SteamlessDeviceCycle WIN32
@@ -283,6 +299,8 @@ add_executable(SteamlessController WIN32
     src/app/SteamWatcher.cpp
     src/app/SteamInputLease.cpp
     src/app/ModeOverlay.cpp
+    src/app/DsuServer.cpp
+    src/app/DsuMotion.cpp
     src/app/DeviceRestart.cpp
     src/app/EventLog.cpp
     src/app/ForegroundWatcher.cpp
@@ -314,6 +332,7 @@ target_link_libraries(SteamlessController PRIVATE
     cfgmgr32
     windowsapp
     gdiplus
+    ws2_32
 )
 if (MSVC)
     target_compile_options(SteamlessController PRIVATE /W4 /WX /utf-8 /wd4828)

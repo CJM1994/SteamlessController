@@ -3,10 +3,10 @@
 ; Non-commercial use only
 
 #define MyAppName "SteamlessController"
-#define MyAppVersion "1.25"
+#define MyAppVersion "2.0.0"
 #define ViGEmSetup "ViGEmBus_1.22.0_x64_x86_arm64.exe"
 #define MyAppPublisher "Dylan Deverill"
-#define MyAppURL "https://github.com/ddeverill/SteamlessController"
+#define MyAppURL "https://github.com/CJM1994/SteamlessController"
 #define MyAppExeName "SteamlessController.exe"
 
 ; Where the packaged binaries come from, spelled once so the version check

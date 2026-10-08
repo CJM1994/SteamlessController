@@ -44,6 +44,9 @@ struct ControllerManager::Slot {
     // holds a write handle too, so both of us are driving this controller. Only
     // meaningful while gameModeActive — it is what the tray reports.
     bool                               sharedHandle = false;
+    // Opened shared by choice (AccessClaim::Cooperative). Distinct from
+    // sharedHandle, which means someone else really was writing.
+    bool                               openShared = false;
     // Result of the claim sweep that runs before any slot is probed, so the
     // per-slot path can use it rather than claiming on its own. Unset when a
     // slot is enabled outside a sweep — a controller switched on while game
@@ -52,6 +55,20 @@ struct ControllerManager::Slot {
     SteamController::AccessClaim       pendingClaim =
                                            SteamController::AccessClaim::Failed;
     int                                lastBatteryPercent = -1;  // -1 = never reported
+
+    // The battery listener for a slot outside game mode; see PassiveLoop.
+    std::thread                        passiveThread;
+    std::atomic<bool>                  passiveRunning{false};
+
+    // DSU port this controller is served on, or -1. Assigned when its read
+    // loop starts, freed when it stops.
+    int                                dsuSlot = -1;
+    // Read thread only: the motion stream and its drift calibration, and
+    // whether the controller's motion sensors are on. They are needed for the
+    // virtual DS4's own gyro and for DSU, and off otherwise — the report is
+    // the same size either way, but the sensors are not free on battery.
+    DsuMotion                          dsuMotion;
+    bool                               imuOn = false;
 
     // Steam + Y powers the controller off, as it does under Steam. Set once the
     // firmware has accepted the command, so the silence and the disconnect that
@@ -362,6 +379,7 @@ ControllerManager::ControllerManager(StateChangedFn onStateChanged)
 ControllerManager::~ControllerManager() {
     g_crashRestoreInstance = nullptr;
     StopPounce();
+    StopAllPassive();
     for (auto& slot : m_slots) {
         // Stop the read loop and virtual controller first (same as DisableGameModeSlot
         // but without the gameModeActive guard — we always want to restore lizard mode).
@@ -400,12 +418,26 @@ bool ControllerManager::IsGameModeShared() const {
         [](const auto& s) { return s->gameModeActive && s->sharedHandle; });
 }
 
+bool ControllerManager::IsGameModeOpenShared() const {
+    return std::any_of(m_slots.begin(), m_slots.end(),
+        [](const auto& s) { return s->gameModeActive && (s->sharedHandle || s->openShared); });
+}
+
 void ControllerManager::OnDeviceChange() {
     SyncDevices();
 }
 
 ControllerManager::GameModeOutcome ControllerManager::EnableGameMode(uint32_t stateWaitMs,
-                                                                     bool allowShared) {
+                                                                     bool allowShared,
+                                                                     bool preferShared) {
+    if (preferShared) allowShared = true;
+    m_preferShared = preferShared;
+    // The claim sweep reopens every slot's handle; nothing may be reading one.
+    StopAllPassive();
+    struct RestartPassive {
+        ControllerManager* self;
+        ~RestartPassive() { self->UpdatePassive(); }
+    } restartPassive{ this };
     // Once the absence of a bus driver is established, re-establish it the
     // cheap way. Finding out by attempting an enable costs the user's
     // controller: each attempt claims the device exclusively and toggles
@@ -432,7 +464,7 @@ ControllerManager::GameModeOutcome ControllerManager::EnableGameMode(uint32_t st
     const auto claimStart = std::chrono::steady_clock::now();
     for (auto& slot : m_slots) {
         if (slot->gameModeActive) continue;
-        slot->pendingClaim    = slot->sc->ClaimGameModeAccess();
+        slot->pendingClaim    = slot->sc->ClaimGameModeAccess(preferShared);
         slot->hasPendingClaim = true;
     }
     m_timing.claimMs += ElapsedMs(claimStart);
@@ -487,8 +519,10 @@ ControllerManager::GameModeOutcome ControllerManager::EnableGameMode(uint32_t st
 }
 
 void ControllerManager::DisableGameMode() {
+    StopAllPassive();
     for (auto& slot : m_slots)
         DisableGameModeSlot(*slot);
+    UpdatePassive();
     NotifyStateChanged();
 }
 
@@ -502,6 +536,7 @@ void ControllerManager::ReleaseDevices(bool keepDocks) {
     DisableGameMode();
     // Close all device handles. Slot destructors call SteamController::Close()
     // which closes the HID handle, allowing another process to open it.
+    StopAllPassive();
     m_slots.clear();
     if (!keepDocks) ReleaseDocks();
     NotifyStateChanged();
@@ -912,6 +947,11 @@ bool ControllerManager::AdoptPounced() {
     }
     if (caught.empty()) return false;
 
+    StopAllPassive();
+    struct RestartPassive {
+        ControllerManager* self;
+        ~RestartPassive() { self->UpdatePassive(); }
+    } restartPassive{ this };
     bool any = false;
     for (auto& [path, h] : caught) {
         // Not a controller, and not what the caller is waiting on, so it does
@@ -946,6 +986,8 @@ bool ControllerManager::AdoptPounced() {
     return any;
 }
 void ControllerManager::SyncDevices() {
+    // Slots may be closed or opened below.
+    StopAllPassive();
     const auto enumStart = std::chrono::steady_clock::now();
     auto livePaths = SteamController::EnumerateAll();
     m_timing.enumerateMs += ElapsedMs(enumStart);
@@ -1005,6 +1047,7 @@ void ControllerManager::SyncDevices() {
             OpenSlot(path);
     }
 
+    UpdatePassive();
     NotifyStateChanged();
 }
 
@@ -1087,13 +1130,14 @@ ControllerManager::EnableGameModeSlot(Slot& slot, bool& padUnavailableOut, bool 
     // Use the claim the sweep already took. Only a slot enabled outside a sweep
     // (a controller switched on while game mode is running) claims here.
     const auto claim = slot.hasPendingClaim ? slot.pendingClaim
-                                            : slot.sc->ClaimGameModeAccess();
+                                            : slot.sc->ClaimGameModeAccess(m_preferShared);
     slot.hasPendingClaim = false;
     if (claim == SteamController::AccessClaim::Failed) {
         EventLog::Write("GAMEMODE: device reopen failed %ls", slot.path.c_str());
         return GameModeOutcome::Blocked;
     }
     slot.sharedHandle = (claim == SteamController::AccessClaim::Shared);
+    slot.openShared   = (claim == SteamController::AccessClaim::Cooperative);
     if (claim == SteamController::AccessClaim::Shared) {
         // Someone else holds a write handle — with Steam running that is Steam,
         // which claims the vendor collection when it registers the controller
@@ -1158,8 +1202,10 @@ ControllerManager::EnableGameModeSlot(Slot& slot, bool& padUnavailableOut, bool 
     // has since had the driver installed.
     m_lastPadDriverMissing = false;
 
-    if (m_profile.platform == ControllerPlatform::PlayStation)
+    if (m_profile.platform == ControllerPlatform::PlayStation) {
         slot.sc->SetImuEnabled(true);
+        slot.imuOn = true;
+    }
 
     EventLog::Write("GAMEMODE: enabled %ls", slot.path.c_str());
     // Takeover is the moment users report the trackpad arriving dead, and what
@@ -1212,7 +1258,83 @@ void ControllerManager::DisableGameModeSlot(Slot& slot) {
 // Read loop
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Battery
+// ---------------------------------------------------------------------------
+
+ControllerManager::BatteryInfo ControllerManager::Battery() const {
+    std::lock_guard<std::mutex> lk(m_batteryMutex);
+    return m_battery;
+}
+
+void ControllerManager::UpdateBattery(uint8_t percent, uint8_t chargeState) {
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lk(m_batteryMutex);
+        changed = m_battery.percent != percent || m_battery.chargeState != chargeState;
+        m_battery.percent     = percent;
+        m_battery.chargeState = chargeState;
+        m_battery.updatedTick = GetTickCount64();
+    }
+    if (changed && m_batteryFn) m_batteryFn();
+}
+
+void ControllerManager::StopAllPassive() {
+    for (auto& slot : m_slots) {
+        slot->passiveRunning = false;
+        if (slot->passiveThread.joinable()) slot->passiveThread.join();
+    }
+}
+
+void ControllerManager::UpdatePassive() {
+    for (auto& slot : m_slots) {
+        const bool want = !slot->gameModeActive && slot->sc && slot->sc->IsOpen()
+                       && !slot->hasPendingClaim;
+        if (want && !slot->passiveThread.joinable()) {
+            slot->passiveRunning = true;
+            slot->passiveThread  = std::thread(&ControllerManager::PassiveLoop, this, slot.get());
+        } else if (!want && slot->passiveThread.joinable()) {
+            slot->passiveRunning = false;
+            slot->passiveThread.join();
+        }
+    }
+}
+
+// Listens and nothing else: no feature report, no write of any kind, so
+// lizard mode, Steam and an emulator reading the controller are all left
+// exactly as they were. Every open handle gets its own copy of each input
+// report, so reading here takes nothing from anyone. Slots with no
+// controller in them simply never report.
+void ControllerManager::PassiveLoop(Slot* slot) {
+    uint8_t buf[64];
+    while (slot->passiveRunning) {
+        const size_t n = slot->sc->ReadReport(buf, sizeof(buf), /*timeoutMs=*/100);
+        if (n >= 3 && buf[0] == SteamController::REPORT_BATTERY_STATUS) {
+            if (slot->lastBatteryPercent != static_cast<int>(buf[2])) {
+                EventLog::Write("BATTERY: %u%% (chargeState=%u, listening)", buf[2], buf[1]);
+                slot->lastBatteryPercent = static_cast<int>(buf[2]);
+            }
+            UpdateBattery(buf[2], buf[1]);
+        }
+    }
+}
+
+void ControllerManager::SetDsu(DsuServer* server, const DsuMotionConfig& config) {
+    std::lock_guard<std::mutex> lk(m_dsuMutex);
+    m_dsu       = server;
+    m_dsuConfig = config;
+    m_dsuGeneration.fetch_add(1);
+}
+
 void ControllerManager::StartReadLoop(Slot& slot) {
+    // The lowest free DSU port, so one controller is always port 0 — which is
+    // where every emulator looks first.
+    for (int i = 0; i < DsuServer::MAX_SLOTS; ++i) {
+        if (m_dsuSlotUsed[i]) continue;
+        m_dsuSlotUsed[i] = true;
+        slot.dsuSlot     = i;
+        break;
+    }
     slot.readRunning = true;
     slot.readThread  = std::thread(&ControllerManager::ReadLoop, this, &slot);
 }
@@ -1221,6 +1343,14 @@ void ControllerManager::StopReadLoop(Slot& slot) {
     slot.readRunning = false;
     if (slot.readThread.joinable())
         slot.readThread.join();
+    if (slot.dsuSlot >= 0) {
+        {
+            std::lock_guard<std::mutex> lk(m_dsuMutex);
+            if (m_dsu) m_dsu->SetConnected(slot.dsuSlot, false);
+        }
+        m_dsuSlotUsed[slot.dsuSlot] = false;
+        slot.dsuSlot = -1;
+    }
 }
 
 void ControllerManager::ReadLoop(Slot* slot) {
@@ -1237,7 +1367,47 @@ void ControllerManager::ReadLoop(Slot* slot) {
     // controller died silently: battery empty, auto-sleep, or wireless drop.
     static constexpr auto kStallThreshold = std::chrono::seconds(4);
 
+    // This thread's copy of the DSU settings, refreshed when they change.
+    DsuServer*      dsu = nullptr;
+    DsuMotionConfig dsuConfig;
+    uint32_t        dsuGeneration  = ~0u;
+    uint32_t        dsuRecalibrate = m_dsuRecalibrate.load();
+    bool            dsuWanted      = false;
+    auto            lastDsuCheck   = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+    LARGE_INTEGER   qpcFreq;
+    QueryPerformanceFrequency(&qpcFreq);
+
     while (slot->readRunning) {
+        // DSU: who is listening, and whether the motion sensors should be on.
+        // Asked a few times a second rather than every frame — the answer
+        // moves at the pace of an emulator starting or stopping.
+        const auto nowDsu = std::chrono::steady_clock::now();
+        if (nowDsu - lastDsuCheck >= std::chrono::milliseconds(250)) {
+            lastDsuCheck = nowDsu;
+            if (m_dsuGeneration.load() != dsuGeneration) {
+                std::lock_guard<std::mutex> lk(m_dsuMutex);
+                dsu           = m_dsu;
+                dsuConfig     = m_dsuConfig;
+                dsuGeneration = m_dsuGeneration.load();
+            }
+            const uint32_t recal = m_dsuRecalibrate.load();
+            if (recal != dsuRecalibrate) {
+                dsuRecalibrate = recal;
+                slot->dsuMotion.Recalibrate();
+            }
+            const bool wanted = dsu && slot->dsuSlot >= 0 && dsu->WantsMotion();
+            if (wanted != dsuWanted) {
+                dsuWanted = wanted;
+                EventLog::Write("DSU: %s motion on port %d", wanted ? "serving" : "stopped serving",
+                                slot->dsuSlot);
+                if (wanted) slot->dsuMotion.Recalibrate();
+            }
+            const bool imuWanted = dsuWanted
+                                || m_profile.platform == ControllerPlatform::PlayStation;
+            if (imuWanted != slot->imuOn && slot->sc->SetImuEnabled(imuWanted))
+                slot->imuOn = imuWanted;
+        }
+
         // Keepalive — the firmware silently reverts to lizard mode (and its
         // autonomous click haptics, which double up with ours as a crunchy
         // burst) after a period without host feature reports. Re-assert the
@@ -1246,7 +1416,10 @@ void ControllerManager::ReadLoop(Slot* slot) {
         const auto nowKa = std::chrono::steady_clock::now();
         if (nowKa - lastKeepalive >= std::chrono::seconds(2)) {
             lastKeepalive = nowKa;
-            const bool ok = slot->sc->SendKeepalive();
+            bool ok = slot->sc->SendKeepalive();
+            // sc2dsu found the sensors need re-asserting like lizard mode does;
+            // riding the keepalive's cadence keeps that to one extra report.
+            if (ok && slot->imuOn) ok = slot->sc->SetImuEnabled(true);
             if (!ok && !keepaliveFailing) {
                 keepaliveFailing = true;
                 EventLog::Write("KEEPALIVE: send failed (device write error)");
@@ -1299,6 +1472,7 @@ void ControllerManager::ReadLoop(Slot* slot) {
                 const uint8_t percent     = buf[2];
                 if (slot->vc)
                     slot->vc->SetBatteryState(percent, chargeState);
+                UpdateBattery(percent, chargeState);
                 if (slot->lastBatteryPercent != static_cast<int>(percent)) {
                     EventLog::Write("BATTERY: %u%% (chargeState=%u)", percent, chargeState);
                     slot->lastBatteryPercent = static_cast<int>(percent);
@@ -1308,6 +1482,16 @@ void ControllerManager::ReadLoop(Slot* slot) {
         }
 
         if (!SteamController::IsStateReportId(buf[0])) continue;
+
+        if (dsuWanted) {
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            const uint64_t nowUs = static_cast<uint64_t>(
+                static_cast<double>(now.QuadPart) * 1e6 / static_cast<double>(qpcFreq.QuadPart));
+            DsuSample sample;
+            if (slot->dsuMotion.Build(buf, n, dsuConfig, nowUs, sample))
+                dsu->Publish(slot->dsuSlot, sample);
+        }
 
         // Report shape, once per read loop. The trackpad mouse needs a longer
         // report than the haptics do, so a transport that reports short loses

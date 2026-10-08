@@ -30,9 +30,11 @@
 
 name: Release
 
+# This fork has no SignPath configuration, so pushing a tag must not start
+# this workflow — it can only fail there. Fork releases are built and published
+# with scripts/package-release.sh (see "Releasing" in README.md). Left runnable
+# by hand for a repository that does have the SignPath secrets.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       signing-policy:

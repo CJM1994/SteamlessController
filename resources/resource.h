@@ -16,7 +16,12 @@
 // not say which build wrote it costs a round trip with whoever reported the bug.
 //
 // Keep in step with MyAppVersion in resources/InnoInstallerScript.iss.
-#define APP_VERSION_MAJOR 1
-#define APP_VERSION_MINOR 25
+//
+// Semantic versioning (MAJOR.MINOR.PATCH), tagged vMAJOR.MINOR.PATCH — see
+// "Versioning" in README.md. 2.0.0 is this fork's first release; the jump
+// from upstream's 1.25 marks the incompatible change of control modes and
+// settings storage.
+#define APP_VERSION_MAJOR 2
+#define APP_VERSION_MINOR 0
 #define APP_VERSION_PATCH 0
-#define APP_VERSION_STR   "1.25"
+#define APP_VERSION_STR   "2.0.0"
